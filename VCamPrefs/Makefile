@@ -18,8 +18,17 @@ WamBamVCamPrefs_FILES = VCamRootListController.m \
                         ../Shared/VCamHUDBridge.m \
                         ../Shared/VCamBootGuard.m
 
-WamBamVCamPrefs_FRAMEWORKS         = UIKit Foundation
-WamBamVCamPrefs_PRIVATE_FRAMEWORKS = Preferences
+WamBamVCamPrefs_FRAMEWORKS = UIKit Foundation
+
+# Preferences is deliberately NOT linked. Theos ships its headers in
+# vendor/include, so PSListController compiles, but the SDK's
+# Preferences.framework carries only a .tbd with no linkable stub, and
+# -framework Preferences fails with "framework 'Preferences' not found".
+#
+# Linking it is unnecessary anyway: this bundle is loaded into Settings, where
+# Preferences.framework is already resident, so -undefined dynamic_lookup below
+# resolves the PSListController class reference at load time. That is also one
+# fewer SDK-shaped thing that can break on a future SDK.
 
 WamBamVCamPrefs_CFLAGS  = -fobjc-arc \
                           -I$(THEOS_PROJECT_DIR)/../Shared \
