@@ -8,20 +8,12 @@
 #include <dispatch/dispatch.h>
 
 // -- Paths ----------------------------------------------------------------
-// These live here, in the lowest-level shared header, rather than alongside the
-// shared-memory layout. They are referenced as `@kVCamConfigPath` in several
-// files, and a translation unit that has the ObjC `@` but not the macro fails
-// with "unexpected '@' in program" -- which points at the wrong thing entirely.
-// Keeping them in the header everything already includes avoids that trap.
-//
-// Deliberately outside any jailbreak prefix: /var/mobile/Library is a real path
-// under rootful, rootless and roothide alike, so the daemon, the app and the
-// HUD all agree on it without any jbroot() translation.
-#define kVCamLibraryDir     "/var/mobile/Library/WamBamVCam"
-#define kVCamConfigPath     kVCamLibraryDir "/Config.plist"
-#define kVCamMediaPath      kVCamLibraryDir "/source"      // + ext (.mov/.jpg/...)
-#define kVCamShmPath        kVCamLibraryDir "/vcam.shm"
-#define kVCamKillSwitchPath kVCamLibraryDir "/killswitch"
+// DO NOT use a bare "/var/mobile/Library/..." path for the shared files. That
+// is the real path, outside the jailbreak tree, and cameracaptured's sandbox
+// denies it -- which is what made the daemon silently do nothing on iOS 26
+// while the HUD (SpringBoard) and the app worked fine. All shared paths are
+// resolved through libroot in VCamPaths.{h,m}; use VCamConfigPath(),
+// VCamShmPath(), vcam_shm_path() and friends, never a string literal here.
 
 // -- Darwin notification names --------------------------------------------
 #define kVCamNotifyConfigChanged  "com.yiffysec.wambamvcam/config-changed"

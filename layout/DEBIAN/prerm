@@ -1,18 +1,13 @@
 #!/bin/sh
 set -e
 
-# Disable before the dylibs disappear, so the daemon's last read of shared state
-# tells it to pass the real camera through rather than look for media that is
-# about to be removed.
-VCAM_DIR="/var/mobile/Library/WamBamVCam"
+# The shared files live under the jailbreak root, which this script cannot
+# resolve, so disabling via the plist here is not possible. It does not matter:
+# once the dylibs are removed the daemon stops substituting on its next spawn,
+# and the respawn below makes that immediate. The runtime kill switch is for
+# boot-loop recovery, not uninstall.
 
-if [ -f "$VCAM_DIR/Config.plist" ]; then
-    /usr/bin/plutil -replace enabled -bool false "$VCAM_DIR/Config.plist" \
-        >/dev/null 2>&1 || true
-fi
-
-# Engage the kill switch for the brief window between file removal and the
-# daemon restart below, so a half-removed install cannot inject.
-touch "$VCAM_DIR/killswitch" 2>/dev/null || true
+killall cameracaptured >/dev/null 2>&1 || true
+killall mediaserverd  >/dev/null 2>&1 || true
 
 exit 0

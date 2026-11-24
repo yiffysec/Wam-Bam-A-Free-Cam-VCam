@@ -13,6 +13,7 @@ BUNDLE_NAME = WamBamVCamPrefs
 
 WamBamVCamPrefs_FILES = VCamRootListController.m \
                         ../Shared/VCamSharedState.c \
+                        ../Shared/VCamPaths.m \
                         ../Shared/VCamDiagnostics.c \
                         ../Shared/VCamConfig.m \
                         ../Shared/VCamHUDBridge.m \

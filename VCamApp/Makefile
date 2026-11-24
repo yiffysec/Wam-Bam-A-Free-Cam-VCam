@@ -17,6 +17,7 @@ WamBamVCam_FILES = main.m \
                    VCamPerAppViewController.m \
                    VCamDiagnosticsViewController.m \
                    ../Shared/VCamSharedState.c \
+                   ../Shared/VCamPaths.m \
                    ../Shared/VCamDiagnostics.c \
                    ../Shared/VCamConfig.m \
                    ../Shared/VCamHUDBridge.m \

@@ -6,6 +6,7 @@
 
 #include "VCamSharedState.h"
 #include "VCamTypes.h"
+#include "VCamPaths.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -30,13 +31,24 @@ static void vcam_shm_reinit_locked(void);
 int vcam_shm_open(void) {
     if (g_shm) return 0;
 
-    mkdir(kVCamLibraryDir, 0755);
+    const char *dir  = vcam_library_dir();
+    const char *path = vcam_shm_path();
 
-    int fd = open(kVCamShmPath, O_RDWR | O_CREAT, 0666);
+    // The app (mobile) and the camera daemon (its own media user) are different
+    // users, and either may be the first to touch these. mkdir's mode is masked
+    // by umask, so chmod explicitly: 0777 on the dir lets whichever user did not
+    // create it still add files, and 0666 on the shm lets both map it R/W. These
+    // live under the jailbreak root, not in a user's private container, so this
+    // is not widening access to anything sensitive.
+    mkdir(dir, 0777);
+    chmod(dir, 0777);
+
+    int fd = open(path, O_RDWR | O_CREAT, 0666);
     if (fd < 0) {
-        VCamLogE("shm_open: open(%{public}s) failed errno=%d", kVCamShmPath, errno);
+        VCamLogE("shm_open: open(%{public}s) failed errno=%d", path, errno);
         return -1;
     }
+    fchmod(fd, 0666);
 
     g_shmsz = sizeof(VCamSharedRegion);
 

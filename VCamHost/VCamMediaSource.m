@@ -7,6 +7,7 @@
 
 #import "VCamMediaSource.h"
 #import "VCamTypes.h"
+#import "VCamPaths.h"
 #import <Foundation/Foundation.h>
 
 static NSArray<NSString *> *vcam_video_extensions(void) {
@@ -23,7 +24,7 @@ static NSString *vcam_conventional_path(VCamSourceType type) {
     NSArray *exts = (type == VCamSourceVideo) ? vcam_video_extensions()
                                               : vcam_photo_extensions();
     for (NSString *ext in exts) {
-        NSString *p = [@kVCamMediaPath stringByAppendingPathExtension:ext];
+        NSString *p = [VCamMediaBasePath() stringByAppendingPathExtension:ext];
         if ([fm fileExistsAtPath:p]) return p;
     }
     return nil;
@@ -69,7 +70,7 @@ static VCamSourceType vcam_type_for_path(NSString *path) {
 
 - (void)resolve {
     NSDictionary *cfg =
-        [NSDictionary dictionaryWithContentsOfFile:@kVCamConfigPath] ?: @{};
+        [NSDictionary dictionaryWithContentsOfFile:VCamConfigPath()] ?: @{};
     NSFileManager *fm = NSFileManager.defaultManager;
 
     // ---- Video / photo ------------------------------------------------

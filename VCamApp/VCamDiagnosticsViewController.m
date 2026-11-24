@@ -4,6 +4,7 @@
 #import "../Shared/VCamSharedState.h"
 #import "../Shared/VCamConfig.h"
 #import "../Shared/VCamTypes.h"
+#import "../Shared/VCamPaths.h"
 
 #include <signal.h>
 #include <errno.h>
@@ -124,19 +125,68 @@ static const VCamHookInfo kHooks[] = {
     // ---- Daemon ------------------------------------------------------
     BOOL daemonAlive = (pid != 0) && (kill((pid_t)pid, 0) == 0 || errno == EPERM);
 
-    [out addObject:[VCamDiagSection
-        header:@"Camera Daemon"
-        footer:daemonAlive
-                ? nil
-                : @"No daemon has reported in. Either the tweak is not injected, "
-                   "the kill switch is engaged, or the daemon has not started "
-                   "since install. Try Restart Camera Daemon on the main screen."
-          rows:@[
-        [VCamDiagRow label:@"Injected"
+    // The breadcrumb is the key to telling the failure modes apart. The daemon
+    // drops it to a plain plist the moment its constructor runs -- before shared
+    // memory, which is the thing most likely to fail. So:
+    //   no breadcrumb        -> the dylib never loaded into cameracaptured
+    //   breadcrumb step<live -> it loaded but stalled (step says where)
+    // Unlike the live diagnostics, this survives a shared-memory failure,
+    // because it does not live in shared memory.
+    NSDictionary *crumb =
+        [NSDictionary dictionaryWithContentsOfFile:VCamBreadcrumbPath()];
+    NSString *crumbStep = crumb[@"step"];
+    NSString *crumbProc = crumb[@"process"];
+    NSTimeInterval crumbAge =
+        crumb ? ([NSDate date].timeIntervalSince1970 - [crumb[@"at"] doubleValue]) : -1;
+
+    NSString *loadState;
+    UIColor  *loadColor;
+    NSString *daemonFooter;
+    if (daemonAlive) {
+        loadState = @"Yes"; loadColor = UIColor.systemGreenColor;
+        daemonFooter = nil;
+    } else if (crumb) {
+        // The dylib definitely loaded -- it wrote this. It just did not finish.
+        loadState = [NSString stringWithFormat:@"Loaded, stalled at “%@”",
+                     crumbStep ?: @"?"];
+        loadColor = UIColor.systemOrangeColor;
+        if ([crumbStep isEqualToString:@"shm-failed"]) {
+            daemonFooter = @"The dylib injected into the camera daemon but could "
+                            "not open its shared memory — a sandbox or permissions "
+                            "problem on the shared file, not an injection failure. "
+                            "This is the case the jailbreak-root path change is "
+                            "meant to fix; if you still see it, the daemon cannot "
+                            "reach the file at all.";
+        } else if ([crumbStep isEqualToString:@"killswitch"]) {
+            daemonFooter = @"The dylib loaded but the boot-loop kill switch is "
+                            "engaged. Clear it under Safety on the main screen.";
+        } else {
+            daemonFooter = @"The dylib injected and started but did not reach the "
+                            "running state. The step above is how far it got.";
+        }
+    } else {
+        loadState = @"No"; loadColor = UIColor.systemRedColor;
+        daemonFooter = @"No sign the dylib ever loaded into cameracaptured — no "
+                        "live report and no startup breadcrumb. The camera daemon "
+                        "respawns when a camera app opens; if this stays “No” "
+                        "after opening Camera, injection into the daemon is not "
+                        "happening. A userspace reboot after install is the usual fix.";
+    }
+
+    NSMutableArray<VCamDiagRow *> *daemonRows = [NSMutableArray arrayWithObject:
+        [VCamDiagRow label:@"Dylib loaded"
+                     value:loadState
+                      note:(crumb && !daemonAlive && crumbProc)
+                             ? [NSString stringWithFormat:@"in %@, %.0fs ago",
+                                 crumbProc, crumbAge]
+                             : nil
+                     color:loadColor]];
+
+    [daemonRows addObjectsFromArray:@[
+        [VCamDiagRow label:@"Reporting live"
                      value:daemonAlive ? @"Yes" : @"No"
                       note:nil
-                     color:daemonAlive ? UIColor.systemGreenColor
-                                       : UIColor.systemRedColor],
+                     color:daemonAlive ? UIColor.systemGreenColor : nil],
         [VCamDiagRow label:@"Process" value:pid ? [NSString stringWithFormat:@"%u", pid]
                                                 : @"—"],
         [VCamDiagRow label:@"iOS"
@@ -157,7 +207,11 @@ static const VCamHookInfo kHooks[] = {
                       note:nil
                      color:lastErr == VCamDiagErrorNone ? nil
                                                         : UIColor.systemRedColor],
-    ]]];
+    ]];
+
+    [out addObject:[VCamDiagSection header:@"Camera Daemon"
+                                    footer:daemonFooter
+                                      rows:daemonRows]];
 
     // ---- Frames ------------------------------------------------------
     // The headline number. Frames seen with nothing replaced is the single

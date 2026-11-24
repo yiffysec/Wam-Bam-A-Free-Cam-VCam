@@ -1,21 +1,13 @@
 #!/bin/sh
 set -e
 
-VCAM_DIR="/var/mobile/Library/WamBamVCam"
+# The imported media and config under the jailbreak root are deliberately left
+# in place: this script cannot resolve that path, and a reinstall should not lose
+# the user's settings. To wipe everything, delete the tweak's directory by hand.
 
-# Clear the shared-memory file and the kill switch. The user's imported media
-# and Config.plist are deliberately left alone: a reinstall should not lose them.
-# Delete the directory by hand if you want a truly clean slate.
-rm -f "$VCAM_DIR/vcam.shm" \
-      "$VCAM_DIR/killswitch" \
-      "$VCAM_DIR/crash_counter" \
-      "$VCAM_DIR/loading.stamp" 2>/dev/null || true
+uicache --all >/dev/null 2>&1 || uicache >/dev/null 2>&1 || true
 
-if [ -x /usr/bin/uicache ]; then
-    uicache --all >/dev/null 2>&1 || uicache >/dev/null 2>&1 || true
-fi
-
-killall -9 cameracaptured >/dev/null 2>&1 || true
-killall -9 mediaserverd  >/dev/null 2>&1 || true
+killall cameracaptured >/dev/null 2>&1 || true
+killall mediaserverd  >/dev/null 2>&1 || true
 
 exit 0

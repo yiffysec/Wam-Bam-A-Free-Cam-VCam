@@ -2,6 +2,7 @@
 #import "AppDelegate.h"
 #import "../Shared/VCamSharedState.h"
 #import "../Shared/VCamTypes.h"
+#import "../Shared/VCamPaths.h"
 #import "VCamMainViewController.h"
 
 @implementation AppDelegate
@@ -14,12 +15,17 @@
         VCamLogE("AppDelegate: shared memory unavailable — using plist fallback");
     }
 
-    // Ensure the library directory exists
+    // Ensure the library directory exists, under the jailbreak root and
+    // world-accessible so the camera daemon (a different user) can reach it too.
+    NSString *dir = VCamLibraryDir();
     [[NSFileManager defaultManager]
-        createDirectoryAtPath:@kVCamLibraryDir
+        createDirectoryAtPath:dir
   withIntermediateDirectories:YES
-                   attributes:nil
+                   attributes:@{ NSFilePosixPermissions: @(0777) }
                         error:nil];
+    [[NSFileManager defaultManager]
+        setAttributes:@{ NSFilePosixPermissions: @(0777) }
+         ofItemAtPath:dir error:nil];
 
     self.window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
     self.window.rootViewController =

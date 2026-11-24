@@ -374,3 +374,52 @@ conditional in all four subprojects, so neither class of bug can recur.
 
 Still unverified: nothing here has run on a device. A clean build says the code
 is well-formed, not that it works.
+
+---
+
+## 9. First on-device test — the daemon never injected (2026-11-24)
+
+First real install, iPhone SE 2 (A13), iOS 26.0, Dopamine 3. The companion app
+worked, settings persisted, and the SpringBoard HUD answered its probe
+(`HUD alive: Yes`) — but the Diagnostics screen showed the camera daemon
+`Injected: No`, every hook `Absent`, zero frames. So ElleKit, the filters,
+signing and the install path were all fine (SpringBoard proves it); only
+`cameracaptured` never reported in.
+
+**Root cause: the shared files were at the wrong path for the daemon's sandbox.**
+They were hardcoded at the bare `/var/mobile/Library/WamBamVCam`, which is the
+real path *outside* the jailbreak root. SpringBoard (broad sandbox) and the app
+(no-sandbox entitlement) reach it, which is exactly why those two worked — but
+`cameracaptured` has a tight media sandbox that denies it. The daemon almost
+certainly injected and then bailed at `vcam_shm_open()`, and because the
+diagnostics live *inside* that shared memory, it could not even report the
+failure: it looked identical to never loading.
+
+The fixes:
+
+1. **All shared paths now resolve through libroot** (`VCamPaths.{h,m}`,
+   `ROOT_PATH_NS`), placing them under the jailbreak root — rootless `/var/jb/…`,
+   roothide's randomized jbroot — which the jailbreak's sandbox patches grant
+   injected processes. Every component (daemon, app, HUD, prefs) converges on the
+   same real file on every scheme; rootful returns the path unchanged.
+2. **A breadcrumb that survives a shared-memory failure.** The daemon drops a
+   tiny plist at each startup milestone (`loaded` → `shm-failed`/`killswitch` →
+   `live`) to a world-readable file, so the app can finally tell "never injected"
+   (no breadcrumb) from "injected but couldn't reach shm" (breadcrumb stalled at
+   a step). The Diagnostics screen now shows this as `Dylib loaded`.
+3. **Cross-user permissions.** Daemon and app run as different users, so the
+   directory is created 0777 and the shared-memory file 0666 by whichever gets
+   there first, and the breadcrumb/config are world-readable.
+4. **Maintainer scripts no longer seed the wrong path.** They cannot resolve the
+   jbroot location, so runtime creation handles it; they keep only uicache and a
+   daemon respawn.
+
+Also fixed in the same pass: the media **import** could hang — the fix
+(dismiss-the-picker-first, background load, 90s watchdog, in-flight state on the
+Media row) had been written but left *uncommitted* in the tree across a session
+boundary, so the installed build never had it. Now committed.
+
+Still unverified until the next on-device test: whether the jbroot path actually
+resolves the daemon's sandbox denial. If `Dylib loaded` shows "stalled at
+shm-failed" again, the daemon cannot reach even the jbroot path and the next step
+is libSandy or a media-directory location.

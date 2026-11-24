@@ -24,6 +24,7 @@
 
 #import <Foundation/Foundation.h>
 #import <substrate.h>
+#import <rootless.h>
 #include <unistd.h>
 #include <errno.h>
 #include <dlfcn.h>
@@ -31,6 +32,7 @@
 #import "VCamTypes.h"
 #import "VCamSharedState.h"
 #import "VCamDiagnostics.h"
+#import "VCamPaths.h"
 #import "VCamBootGuard.h"
 #import "VCamFrameEngine.h"
 #import "VCamMediaSource.h"
@@ -40,74 +42,100 @@
 void vcam_install_hooks_ios18(void);
 void vcam_install_hooks_ios17(void);
 
+// -- Breadcrumb -----------------------------------------------------------
+// The single most useful diagnostic, and the one the first build lacked. The
+// daemon's live diagnostics live inside shared memory, so if shared memory
+// cannot be opened the daemon reports nothing -- identical to never having
+// loaded. This breadcrumb is a tiny plist written to the (libroot-resolved)
+// tweak directory at each startup milestone, so the companion app can tell the
+// two apart:
+//
+//   no breadcrumb            -> the dylib never loaded into cameracaptured
+//   breadcrumb, step < "shm" -> it loaded but could not reach shared memory
+//   breadcrumb, step "live"  -> it is running; read the full diagnostics
+static void vcam_breadcrumb(const char *step, int err) {
+    @autoreleasepool {
+        NSDictionary *crumb = @{
+            @"pid":       @(getpid()),
+            @"step":      @(step),
+            @"errno":     @(err),
+            @"at":        @([[NSDate date] timeIntervalSince1970]),
+            @"process":   @(getprogname() ?: "?"),
+        };
+        NSFileManager *fm = [NSFileManager defaultManager];
+        [fm createDirectoryAtPath:VCamLibraryDir()
+      withIntermediateDirectories:YES
+                       attributes:@{ NSFilePosixPermissions: @(0777) }
+                            error:nil];
+        NSString *path = VCamBreadcrumbPath();
+        [crumb writeToFile:path atomically:YES];
+        // The companion app reads this as a different user, so it must be
+        // world-readable -- the whole point is that it survives where shared
+        // memory could not.
+        [fm setAttributes:@{ NSFilePosixPermissions: @(0644) }
+             ofItemAtPath:path error:nil];
+    }
+}
+
 // -- libSandy -------------------------------------------------------------
-// cameracaptured and mediaserverd run in their own sandboxes, which deny reads
-// of /var/mobile/Library by default. libSandy consumes the profile we ship at
-// /Library/libSandy/WamBamVCam.plist and hands the daemon a sandbox extension
-// for exactly that directory.
+// Belt-and-suspenders only. With the shared files now under the jailbreak root
+// (see VCamPaths), the jailbreak's own sandbox patches already grant the daemon
+// access, so this is no longer load-bearing -- it mainly helps the rootful case,
+// where the path is the real /var/mobile/Library and the daemon is still
+// sandboxed.
 //
-// Resolved with dlopen/dlsym rather than linked. Linking it -- even weakly --
-// makes libsandy.dylib a load-time dependency of this dylib, and a load failure
-// inside the camera daemon means a broken camera. dlopen cannot fail that way:
-// the worst case is a log line and an unextended sandbox.
-//
-// Several paths are tried because the library lives in a different place under
-// each jailbreak scheme. The usual presentation of a missing extension is "the
-// tweak does nothing", with config and media reads failing silently, so this is
-// worth being loud about.
+// Resolved with dlopen/dlsym, never linked: linking would make libsandy.dylib a
+// load-time dependency of a dylib that loads into the camera daemon, and a load
+// failure there is a broken camera. dlopen's worst case is a log line. The
+// library path is resolved through libroot so it is correct on every scheme,
+// including roothide's randomized root.
 #define kVCamSandyProfile "WamBamVCam"
 #define kVCamSandySuccess 0
 
 typedef int (*VCamSandyFn)(const char *);
 
 static void vcam_apply_sandbox_extensions(void) {
-    static const char *candidates[] = {
-        "libsandy.dylib",                            // already loaded, or on the path
-        "/usr/lib/libsandy.dylib",                   // rootful, and roothide via jbroot
-        "/var/jb/usr/lib/libsandy.dylib",            // rootless
-        "/usr/lib/libSandy.dylib",
-        "/var/jb/usr/lib/libSandy.dylib",
-    };
-
-    void *handle = NULL;
-    for (size_t i = 0; i < VCAM_ARRAY_SIZE(candidates); i++) {
-        handle = dlopen(candidates[i], RTLD_LAZY | RTLD_NOLOAD);
-        if (!handle) handle = dlopen(candidates[i], RTLD_LAZY);
-        if (handle) break;
+    void *handle = dlopen("libsandy.dylib", RTLD_LAZY | RTLD_NOLOAD);
+    if (!handle) handle = dlopen("libsandy.dylib", RTLD_LAZY);
+    if (!handle) {
+        // Resolve the real location through libroot (jbroot-aware).
+        NSString *p = ROOT_PATH_NS(@"/usr/lib/libsandy.dylib");
+        if (p.length) handle = dlopen(p.fileSystemRepresentation, RTLD_LAZY);
     }
 
     if (!handle) {
-        VCamLogE("sandbox: libSandy not found. If the daemon cannot read "
-                 "%{public}s, install com.opa334.libsandy.", kVCamConfigPath);
+        VCamLogI("sandbox: libSandy not present (fine when the shared files are "
+                 "under the jailbreak root)");
         return;
     }
 
     VCamSandyFn apply =
         (VCamSandyFn)dlsym(handle, "libSandy_applySandboxExtensions");
     if (!apply) {
-        VCamLogE("sandbox: libSandy loaded but the entry point is missing");
+        VCamLogI("sandbox: libSandy loaded but the entry point is missing");
         return;
     }
 
     int rc = apply(kVCamSandyProfile);
-    if (rc == kVCamSandySuccess) {
-        VCamLogI("sandbox: libSandy profile '%{public}s' applied",
-                 kVCamSandyProfile);
-    } else {
-        VCamLogE("sandbox: libSandy profile '%{public}s' failed rc=%d -- config "
-                 "and media reads may be denied", kVCamSandyProfile, rc);
-    }
+    VCamLogI("sandbox: libSandy profile '%{public}s' -> rc=%d",
+             kVCamSandyProfile, rc);
 }
 
 /// Confirms the daemon can actually read the config. Cheap, and turns an
-/// invisible sandbox denial into one explicit log line.
+/// invisible sandbox denial into one explicit log line and diagnostics code.
 static void vcam_verify_config_readable(void) {
-    if (access(kVCamConfigPath, R_OK) == 0) {
-        VCamLogI("sandbox: %{public}s is readable", kVCamConfigPath);
+    const char *cfg = vcam_config_path();
+    if (access(cfg, R_OK) == 0) {
+        VCamLogI("sandbox: %{public}s is readable", cfg);
+        return;
+    }
+    // ENOENT just means no config written yet (first install) -- not a denial.
+    if (errno == ENOENT) {
+        VCamLogI("sandbox: %{public}s absent (no config yet) -- using defaults", cfg);
         return;
     }
     VCamLogE("sandbox: cannot read %{public}s (errno=%d). The virtual camera "
-             "will stay idle until this is resolved.", kVCamConfigPath, errno);
+             "will stay idle until this is resolved.", cfg, errno);
     vcam_diag_set_last_error(VCamDiagErrorSandboxDenied);
 }
 
@@ -143,9 +171,14 @@ static void VCamHostInit(void) {
 
         const char *pname = getprogname() ?: "?";
 
+        // Earliest possible proof-of-life, before anything can fail. If this
+        // file never appears, the dylib never loaded into the daemon at all.
+        vcam_breadcrumb("loaded", 0);
+
         // 2 -- Boot guard first. Nothing above this line may allocate or hook.
         if (!vcam_bootguard_check()) {
             VCamLogE("init: boot guard refused injection in %{public}s", pname);
+            vcam_breadcrumb("killswitch", 0);
             return;
         }
 
@@ -182,6 +215,9 @@ static void VCamHostInit(void) {
         //       its result into diagnostics.
         if (vcam_shm_open() != 0) {
             VCamLogE("init: shared memory unavailable -- not hooking");
+            // Breadcrumb records the step so the app can see "loaded but shm
+            // failed" rather than assuming the dylib never ran.
+            vcam_breadcrumb("shm-failed", errno);
             vcam_bootguard_reset();
             return;
         }
@@ -251,6 +287,7 @@ static void VCamHostInit(void) {
 
         // 9 -- Survived startup; clear the crash counter.
         vcam_bootguard_reset();
+        vcam_breadcrumb("live", 0);
 
         VCamLogI("init: injection live in %{public}s", pname);
     }

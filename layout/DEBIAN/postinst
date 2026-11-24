@@ -1,62 +1,28 @@
 #!/bin/sh
 set -e
 
-# Where the config, the imported media and the shared-memory file live.
-# The camera daemon runs as a different user than mobile, so the directory has
-# to be traversable and the files world-readable. libSandy grants the sandbox
-# extension; these permissions grant the POSIX half.
-VCAM_DIR="/var/mobile/Library/WamBamVCam"
+# The shared files (config, media, shared memory) are NOT created here anymore.
+#
+# They live under the jailbreak root, which the app and daemon resolve at runtime
+# through libroot -- and a maintainer script cannot resolve that path reliably
+# (it is randomized on roothide, and scripts are not path-rewritten). So the app
+# and daemon create the directory and files on demand, world-accessible, at the
+# one location all components agree on. Seeding them here, at the bare
+# /var/mobile/Library path, only created stray files the daemon never reads --
+# which is the bug this whole change set fixes. Runtime seeding (VCamConfig
+# defaults, plus the shared-memory magic/version reinitialise) covers a fresh
+# install.
 
-mkdir -p "$VCAM_DIR"
-chown mobile:mobile "$VCAM_DIR" 2>/dev/null || true
-chmod 755 "$VCAM_DIR"
+# Register the app so it appears without a respring. PATH-based: uicache lives at
+# a different absolute path on rootful vs rootless/roothide.
+uicache --all >/dev/null 2>&1 || uicache >/dev/null 2>&1 || true
 
-# A fresh install starts disabled. Nothing is replaced until the user says so.
-if [ ! -f "$VCAM_DIR/Config.plist" ]; then
-    cat > "$VCAM_DIR/Config.plist" <<'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>enabled</key><false/>
-    <key>paused</key><false/>
-    <key>sourceType</key><integer>0</integer>
-    <key>fitMode</key><integer>0</integer>
-    <key>rotation</key><integer>0</integer>
-    <key>zoom</key><real>1.0</real>
-    <key>panX</key><real>0.0</real>
-    <key>panY</key><real>0.0</real>
-    <key>mirrorH</key><false/>
-    <key>mirrorV</key><false/>
-    <key>hudEnabled</key><true/>
-    <key>useRealAudio</key><true/>
-    <key>perAppEnabled</key><false/>
-    <key>perAppList</key><array/>
-</dict>
-</plist>
-PLIST
-    chown mobile:mobile "$VCAM_DIR/Config.plist" 2>/dev/null || true
-    chmod 644 "$VCAM_DIR/Config.plist"
-fi
-
-# Any kill switch left over from a previous version is stale on a fresh install.
-# vcam.shm goes too: it is a file, so it survives upgrades, and if the struct
-# layout changed between versions every field in it would be misread. The code
-# validates a magic/version header and reinitialises on mismatch, but removing
-# it here means that path is a safety net rather than the normal case.
-rm -f "$VCAM_DIR/killswitch" \
-      "$VCAM_DIR/crash_counter" \
-      "$VCAM_DIR/loading.stamp" \
-      "$VCAM_DIR/vcam.shm"
-
-# Register the app with the icon cache so it appears without a respring.
-if [ -x /usr/bin/uicache ]; then
-    uicache --all >/dev/null 2>&1 || uicache >/dev/null 2>&1 || true
-fi
-
-# Restart the capture daemon so hooks take effect immediately. launchd brings it
-# straight back; any app mid-capture simply restarts its session.
-killall -9 cameracaptured >/dev/null 2>&1 || true
-killall -9 mediaserverd  >/dev/null 2>&1 || true
+# Force the capture daemon to respawn so it picks up the newly installed dylib.
+# launchd brings it straight back, injected, the next time a camera opens; any
+# app mid-capture simply restarts its session. If injection into the daemon does
+# not take after this, a userspace reboot is the reliable fix (the companion
+# app's Diagnostics screen will show whether the dylib loaded).
+killall cameracaptured >/dev/null 2>&1 || true
+killall mediaserverd  >/dev/null 2>&1 || true
 
 exit 0

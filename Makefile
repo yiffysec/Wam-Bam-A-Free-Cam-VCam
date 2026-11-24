@@ -27,6 +27,7 @@ WBFCVCamHost_FILES = VCamHost/VCamHostMain.x \
                      VCamHost/VCamPixelConverter.m \
                      VCamHost/VCamMediaSource.m \
                      Shared/VCamSharedState.c \
+                     Shared/VCamPaths.m \
                      Shared/VCamDiagnostics.c \
                      Shared/VCamBootGuard.m
 

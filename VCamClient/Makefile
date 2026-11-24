@@ -13,6 +13,7 @@ TWEAK_NAME = WBFCVCamClient
 
 WBFCVCamClient_FILES      = VCamClient.x \
                              ../Shared/VCamSharedState.c \
+                             ../Shared/VCamPaths.m \
                              ../Shared/VCamDiagnostics.c \
                              ../Shared/VCamConfig.m
 

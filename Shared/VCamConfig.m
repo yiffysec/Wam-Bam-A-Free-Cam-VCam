@@ -1,6 +1,7 @@
 // VCamConfig.m -- Durable configuration layer
 #import "VCamConfig.h"
 #import "VCamTypes.h"
+#import "VCamPaths.h"
 
 @implementation VCamConfig {
     NSMutableDictionary *_dict;
@@ -27,7 +28,7 @@
 }
 
 - (void)reload {
-    NSDictionary *onDisk = [NSDictionary dictionaryWithContentsOfFile:@kVCamConfigPath];
+    NSDictionary *onDisk = [NSDictionary dictionaryWithContentsOfFile:VCamConfigPath()];
     dispatch_sync(_q, ^{
         [_dict removeAllObjects];
         if (onDisk) [_dict addEntriesFromDictionary:onDisk];
@@ -43,22 +44,24 @@
     __block NSDictionary *copy;
     dispatch_sync(_q, ^{ copy = [_dict copy]; });
 
-    [[NSFileManager defaultManager] createDirectoryAtPath:@kVCamLibraryDir
+    NSString *configPath = VCamConfigPath();
+
+    [[NSFileManager defaultManager] createDirectoryAtPath:VCamLibraryDir()
                              withIntermediateDirectories:YES
                                               attributes:nil
                                                    error:nil];
 
     // Atomic replace so the daemon never observes a half-written plist.
-    NSString *tmp = [@kVCamConfigPath stringByAppendingPathExtension:@"tmp"];
+    NSString *tmp = [configPath stringByAppendingPathExtension:@"tmp"];
     if ([copy writeToFile:tmp atomically:YES]) {
         NSFileManager *fm = [NSFileManager defaultManager];
-        [fm removeItemAtPath:@kVCamConfigPath error:nil];
-        [fm moveItemAtPath:tmp toPath:@kVCamConfigPath error:nil];
+        [fm removeItemAtPath:configPath error:nil];
+        [fm moveItemAtPath:tmp toPath:configPath error:nil];
         // World-readable: the daemon runs as a different user.
         [fm setAttributes:@{ NSFilePosixPermissions: @(0644) }
-             ofItemAtPath:@kVCamConfigPath error:nil];
+             ofItemAtPath:configPath error:nil];
     } else {
-        VCamLogE("VCamConfig: failed to write %{public}s", kVCamConfigPath);
+        VCamLogE("VCamConfig: failed to write %{public}@", configPath);
     }
 
     [self publish];

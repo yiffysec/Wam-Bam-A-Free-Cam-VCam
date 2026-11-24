@@ -7,6 +7,7 @@
 #import "../Shared/VCamHUDBridge.h"
 #import "../Shared/VCamBootGuard.h"
 #import "../Shared/VCamTypes.h"
+#import "../Shared/VCamPaths.h"
 
 #import <PhotosUI/PhotosUI.h>
 #import <AVFoundation/AVFoundation.h>
@@ -168,6 +169,7 @@ typedef NS_ENUM(NSInteger, VCamRowKind) {
                                        UIDocumentPickerDelegate>
 @property (nonatomic, copy) NSArray<VCamSection *> *sections;
 @property (nonatomic, assign) BOOL pickingAudio;
+@property (nonatomic, assign) BOOL importInFlight;   // Media row shows "Importing…"
 @property (nonatomic, strong) UIView *bannerView;
 @property (nonatomic, strong) UILabel *bannerLabel;
 
@@ -349,11 +351,15 @@ typedef NS_ENUM(NSInteger, VCamRowKind) {
     [s addObject:[VCamSection header:@"Media Source" footer:mediaFooter rows:@[
         [VCamRow disclosureRow:@"Choose Video or Photo"
                          value:^NSString * {
+            if (weakSelf.importInFlight) return @"Importing…";
             NSString *p = cfg.sourcePath;
             if (!p.length) return @"None";
             return p.lastPathComponent;
         }
-                        action:^{ [weakSelf presentMediaPicker]; }],
+                        action:^{
+            if (weakSelf.importInFlight) return;   // ignore taps mid-import
+            [weakSelf presentMediaPicker];
+        }],
         [VCamRow disclosureRow:@"Import From Files"
                          value:nil
                         action:^{ [weakSelf presentDocumentPickerForAudio:NO]; }],
@@ -544,43 +550,74 @@ typedef NS_ENUM(NSInteger, VCamRowKind) {
 
 - (void)picker:(PHPickerViewController *)picker
 didFinishPicking:(NSArray<PHPickerResult *> *)results {
-    [picker dismissViewControllerAnimated:YES completion:nil];
-    if (!results.count) return;
+    // Dismiss FIRST, and start the import only once the dismissal animation has
+    // finished. The previous version showed a progress alert immediately after
+    // requesting dismissal, so the alert's present and the import's background
+    // completion could collide on the presentation controller -- which is the
+    // "stuck on Importing" hang. Serialising through the dismiss completion
+    // removes the race entirely.
+    __weak typeof(self) weakSelf = self;
+    NSArray<PHPickerResult *> *picked = results;
 
-    NSItemProvider *ip = results.firstObject.itemProvider;
+    [picker dismissViewControllerAnimated:YES completion:^{
+        if (!picked.count) return;
 
-    BOOL isVideo = [ip hasItemConformingToTypeIdentifier:UTTypeMovie.identifier];
-    NSString *typeID = isVideo ? UTTypeMovie.identifier : UTTypeImage.identifier;
+        NSItemProvider *ip = picked.firstObject.itemProvider;
+        BOOL isVideo = [ip hasItemConformingToTypeIdentifier:UTTypeMovie.identifier];
+        NSString *typeID = isVideo ? UTTypeMovie.identifier : UTTypeImage.identifier;
 
-    [self showProgress:@"Importing…"];
+        [weakSelf beginImportFromProvider:ip typeID:typeID isVideo:isVideo];
+    }];
+}
+
+/// Runs the PHPicker file export with inline status and a watchdog, calling back
+/// exactly once. The load's completion handler can run on any queue, so every
+/// completion path funnels through -finishImport:... on the main queue, guarded
+/// so the watchdog and the real result cannot both win.
+- (void)beginImportFromProvider:(NSItemProvider *)ip
+                         typeID:(NSString *)typeID
+                        isVideo:(BOOL)isVideo {
+    self.importInFlight = YES;
+    [self rebuildSections];   // the Media row now reads "Importing…"
 
     __weak typeof(self) weakSelf = self;
+    __block BOOL done = NO;
+
+    void (^finish)(NSString *, NSString *) = ^(NSString *dest, NSString *errText) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) self2 = weakSelf;
+            if (!self2 || done) return;   // first result wins; ignore the rest
+            done = YES;
+            self2.importInFlight = NO;
+            if (dest) {
+                VCamConfig *cfg = [VCamConfig shared];
+                cfg.sourceType = isVideo ? VCamSourceVideo : VCamSourcePhoto;
+                cfg.sourcePath = dest;
+            }
+            [self2 rebuildSections];
+            if (errText) [self2 showError:errText];
+        });
+    };
+
+    // Watchdog: a PHPicker export of an iCloud asset that never downloads can
+    // leave the completion handler un-called forever. Cap it so the UI always
+    // recovers with an explanation instead of hanging.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(90 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        finish(nil, @"Importing timed out. If the item is in iCloud, open Photos "
+                     "and download it to this device first, then try again.");
+    });
+
     [ip loadFileRepresentationForTypeIdentifier:typeID
                               completionHandler:^(NSURL *url, NSError *error) {
         if (!url || error) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [weakSelf dismissProgressThen:^{
-                    [weakSelf showError:error.localizedDescription
-                                          ?: @"The picker returned no file."];
-                }];
-            });
+            finish(nil, error.localizedDescription ?: @"The picker returned no file.");
             return;
         }
-        NSString *dest = [weakSelf importFileAtURL:url
-                                          asVideo:isVideo
-                                            audio:NO];
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [weakSelf dismissProgressThen:^{
-                if (dest) {
-                    VCamConfig *cfg = [VCamConfig shared];
-                    cfg.sourceType = isVideo ? VCamSourceVideo : VCamSourcePhoto;
-                    cfg.sourcePath = dest;
-                    [weakSelf rebuildSections];
-                } else {
-                    [weakSelf showError:@"Could not copy the file into the tweak's directory."];
-                }
-            }];
-        });
+        // File work on the background queue the handler already runs on.
+        NSString *dest = [weakSelf importFileAtURL:url asVideo:isVideo audio:NO];
+        finish(dest, dest ? nil
+                          : @"Could not copy the file into the tweak's directory.");
     }];
 }
 
@@ -631,12 +668,18 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
 /// atomic replace, so the daemon never opens a half-written file.
 - (NSString *)importFileAtURL:(NSURL *)src asVideo:(BOOL)isVideo audio:(BOOL)audio {
     NSFileManager *fm = [NSFileManager defaultManager];
-    [fm createDirectoryAtPath:@kVCamLibraryDir
-  withIntermediateDirectories:YES attributes:nil error:nil];
+    // Under the jailbreak root and world-accessible: the camera daemon reads
+    // these files as a different user. The path MUST match what the daemon
+    // resolves, which is why both sides go through VCamPaths rather than a
+    // literal -- a mismatch here is the daemon reading an empty directory.
+    [fm createDirectoryAtPath:VCamLibraryDir()
+  withIntermediateDirectories:YES
+                   attributes:@{ NSFilePosixPermissions: @(0777) }
+                        error:nil];
 
     NSString *ext = src.pathExtension.length ? src.pathExtension
                                               : (isVideo ? @"mov" : @"jpg");
-    NSString *base = audio ? @kVCamLibraryDir "/audio" : @kVCamMediaPath;
+    NSString *base = audio ? VCamAudioBasePath() : VCamMediaBasePath();
     NSString *dest = [base stringByAppendingPathExtension:ext];
     NSString *tmp  = [dest stringByAppendingPathExtension:@"part"];
 
@@ -678,9 +721,9 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
 
 - (void)clearMedia {
     NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *base = VCamMediaBasePath();
     for (NSString *e in @[@"mov", @"mp4", @"m4v", @"jpg", @"jpeg", @"png", @"heic"]) {
-        [fm removeItemAtPath:[@kVCamMediaPath stringByAppendingPathExtension:e]
-                       error:nil];
+        [fm removeItemAtPath:[base stringByAppendingPathExtension:e] error:nil];
     }
     VCamConfig *cfg = [VCamConfig shared];
     cfg.sourcePath = nil;

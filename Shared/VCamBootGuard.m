@@ -1,14 +1,15 @@
 // VCamBootGuard.m — Crash watchdog + kill-switch for boot-loop prevention
 #import "VCamBootGuard.h"
 #import "VCamTypes.h"
+#import "VCamPaths.h"
 #import <Foundation/Foundation.h>
 
-static NSString *const kLoadingStampPath =
-    @kVCamLibraryDir "/loading.stamp";
-static NSString *const kCrashCounterPath =
-    @kVCamLibraryDir "/crash_counter";
-static NSString *const kKillSwitchPath   =
-    @kVCamLibraryDir "/killswitch";
+// Resolved through libroot (see VCamPaths). These must land under the jailbreak
+// root so the camera daemon can both read the kill switch and write its own
+// crash stamp -- a bare /var/mobile/Library path is denied to its sandbox.
+#define kLoadingStampPath VCamLoadingStampPath()
+#define kCrashCounterPath VCamCrashCounterPath()
+#define kKillSwitchPath   VCamKillSwitchPath()
 
 static const NSTimeInterval kCrashWindowSec     = 30.0;
 static const NSInteger      kMaxCrashesBeforeKS = 3;
@@ -42,7 +43,7 @@ void vcam_bootguard_clear_killed(void) {
 BOOL vcam_bootguard_check(void) {
     // Ensure library directory exists
     [[NSFileManager defaultManager]
-        createDirectoryAtPath:@kVCamLibraryDir
+        createDirectoryAtPath:VCamLibraryDir()
   withIntermediateDirectories:YES
                    attributes:nil
                         error:nil];
