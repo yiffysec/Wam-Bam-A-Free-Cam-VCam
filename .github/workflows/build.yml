@@ -12,7 +12,7 @@ on:
 jobs:
   build:
     name: ${{ matrix.scheme }}
-    runs-on: macos-14
+    runs-on: macos-latest
 
     strategy:
       fail-fast: false
@@ -58,11 +58,14 @@ jobs:
           cd ~/theos/sdks
           curl -sSL -o sdk.tar.gz \
             https://github.com/theos/sdks/archive/refs/heads/master.tar.gz
-          tar -xzf sdk.tar.gz --strip-components=1 \
-            --include='*/iPhoneOS1[5-9].*.sdk' \
-            --include='*/iPhoneOS2*.sdk' 2>/dev/null \
-            || tar -xzf sdk.tar.gz --strip-components=1
+          tar -xzf sdk.tar.gz --strip-components=1
           rm -f sdk.tar.gz
+          # Keep only the newest SDK to stay well inside the cache size limit.
+          newest="$(ls -d iPhoneOS*.sdk | sort -V | tail -1)"
+          echo "keeping $newest"
+          for d in iPhoneOS*.sdk; do
+            [ "$d" = "$newest" ] || rm -rf "$d"
+          done
           ls -1
 
       - name: Install ldid
@@ -79,10 +82,12 @@ jobs:
           grep '^Architecture:' layout/DEBIAN/control
 
       - name: Build
-        env:
-          THEOS: /Users/runner/theos
         run: |
           set -euo pipefail
+          export THEOS="$HOME/theos"
+          echo "THEOS=$THEOS"
+          ls "$THEOS/sdks" || true
+
           if [ "${{ matrix.scheme }}" = "rootful" ]; then
             make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=
           else
