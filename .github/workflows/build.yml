@@ -70,10 +70,15 @@ jobs:
 
   build:
     name: ${{ matrix.scheme }}
-    # Intel rather than arm64: the hosted macOS arm64 pool is capacity
-    # constrained and repeatedly failed to acquire a runner at all. Theos
-    # cross-compiles to arm64 iOS either way, so the host architecture does not
-    # affect the output.
+    # The "-intel" suffix is load-bearing. DO NOT drop it back to macos-26 or
+    # macos-latest: there is an ongoing global problem with the hosted macOS
+    # Apple-silicon runners, and jobs targeting them are simply never acquired
+    # ("The job was not acquired by Runner of type hosted even after multiple
+    # attempts", alongside arm64 capacity warnings). Appending -intel pins the
+    # job to the x86_64 pool, which works.
+    #
+    # This costs nothing: Theos cross-compiles to arm64 iOS regardless, so the
+    # host architecture has no bearing on the package that comes out.
     runs-on: macos-26-intel
 
     # Gated on the Linux check so a scarce macOS runner is never spent on code

@@ -1,5 +1,10 @@
-export ARCHS                 = arm64 arm64e
-export TARGET                = iphone:clang:latest:15.0
+# ARCHS and TARGET are conditional so the root Makefile's exported
+# values win when built as a subproject, and a standalone build of
+# this component still has sane defaults. An earlier hardcoded SDK
+# version here drifted out of step with the root and broke the build
+# with "Your chosen SDK does not appear to exist".
+export ARCHS                ?= arm64 arm64e
+export TARGET               ?= iphone:clang:latest:15.0
 export THEOS_PACKAGE_SCHEME ?= roothide
 
 include $(THEOS)/makefiles/common.mk
