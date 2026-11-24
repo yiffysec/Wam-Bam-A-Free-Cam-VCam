@@ -1,12 +1,29 @@
-// VCamPixelConverter.h — Metal-backed pixel format conversion + CIContext
+// VCamPixelConverter.h -- The shared Metal-backed CIContext
 //
-// Provides:
-//   - A shared Metal-backed CIContext for CIImage rendering
-//   - BGRA → 420v conversion (Metal compute shader)
-//   - 420v → BGRA conversion (for still-sink delivery)
+// Deliberately small. An earlier version carried a hand-written BGRA->NV12
+// Metal compute kernel, compiled from source at runtime. Both the kernel and
+// the compile are gone, for two reasons:
+//
+//   1. It was dead code. The frame engine renders CIImages straight into
+//      destination buffers whose pixel format is whatever the client asked for,
+//      and CoreImage performs the RGB-to-YCbCr conversion itself, honouring the
+//      colour attachments set on the destination. Nothing ever called the
+//      kernel.
+//
+//   2. Compiling Metal from source text costs hundreds of milliseconds, and the
+//      earlier code spent them inside cameracaptured's startup path -- while
+//      SpringBoard waits synchronously on that daemon's torch service during
+//      boot, and concurrently with Apple's own GPU prewarm, which is known to
+//      crash-loop in some iOS 26 configurations.
+//
+// What remains is one CIContext with a defined working colour space. Setup is
+// still deferred off the constructor: creating a Metal device is much cheaper
+// than compiling a shader, but it is not free, and the camera daemon's startup
+// is not the place to find out.
 
 #pragma once
 #import <Foundation/Foundation.h>
+#import <CoreImage/CoreImage.h>
 #import <CoreVideo/CoreVideo.h>
 
 NS_ASSUME_NONNULL_BEGIN
@@ -15,31 +32,19 @@ NS_ASSUME_NONNULL_BEGIN
 
 @property (class, nonatomic, readonly) VCamPixelConverter *sharedConverter;
 
-/// Arms the converter. Safe to call from a dylib constructor: the expensive
-/// Metal work is deferred to a background queue, because compiling a shader
-/// inside cameracaptured's startup path risks delaying the torch XPC service
-/// SpringBoard waits on during boot. See the comment on -setup.
+/// Arms the converter. Safe to call from a dylib constructor: the Metal work
+/// happens on a background queue.
 - (void)setup;
 
-/// Blocks until setup has completed. Call from a worker thread only, never from
-/// a constructor and never from a hook on the capture thread.
+/// Blocks until setup has completed. Call from a worker thread only -- never
+/// from a constructor, and never from a hook on the capture thread.
 - (void)ensureReady;
 
 /// YES once -ciContext is usable.
 @property (nonatomic, readonly) BOOL isReady;
 
-/// The shared Metal-backed CIContext. nil until setup completes.
+/// The shared CIContext. nil until setup completes.
 @property (nonatomic, readonly, nullable) CIContext *ciContext;
-
-/// Convert a 420v CVPixelBuffer to BGRA. Returns a new, retained buffer, or
-/// NULL on failure. Caller must CVPixelBufferRelease.
-- (nullable CVPixelBufferRef)convertToBGRA:(CVPixelBufferRef)src420v
-                                            CF_RETURNS_RETAINED;
-
-/// Convert a BGRA CVPixelBuffer to 420v. Returns a new, retained buffer, or
-/// NULL on failure. Caller must CVPixelBufferRelease.
-- (nullable CVPixelBufferRef)convertTo420v:(CVPixelBufferRef)srcBGRA
-                                            CF_RETURNS_RETAINED;
 
 @end
 

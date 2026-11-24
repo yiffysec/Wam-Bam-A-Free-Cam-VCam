@@ -8,6 +8,7 @@ TWEAK_NAME = WBFCVCamSpring
 
 WBFCVCamSpring_FILES = VCamSpringBoard.x \
                        ../Shared/VCamSharedState.c \
+                       ../Shared/VCamDiagnostics.c \
                        ../Shared/VCamConfig.m \
                        ../Shared/VCamHUDBridge.m
 

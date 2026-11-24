@@ -30,6 +30,7 @@
 
 #import "VCamTypes.h"
 #import "VCamSharedState.h"
+#import "VCamDiagnostics.h"
 #import "VCamBootGuard.h"
 #import "VCamFrameEngine.h"
 #import "VCamMediaSource.h"
@@ -107,6 +108,7 @@ static void vcam_verify_config_readable(void) {
     }
     VCamLogE("sandbox: cannot read %{public}s (errno=%d). The virtual camera "
              "will stay idle until this is resolved.", kVCamConfigPath, errno);
+    vcam_diag_set_last_error(VCamDiagErrorSandboxDenied);
 }
 
 // -- Version state --------------------------------------------------------
@@ -173,15 +175,22 @@ static void VCamHostInit(void) {
 
         // 4a -- Sandbox extensions, before any read of our own directory.
         vcam_apply_sandbox_extensions();
-        vcam_verify_config_readable();
 
         // 4b -- Shared memory. Without it there is no way to read the user's
         //       intent on the hot path, so stop rather than hook blindly.
+        //       Opened before the readability check so the check can publish
+        //       its result into diagnostics.
         if (vcam_shm_open() != 0) {
             VCamLogE("init: shared memory unavailable -- not hooking");
             vcam_bootguard_reset();
             return;
         }
+
+        vcam_diag_set_daemon_pid((uint32_t)getpid());
+        vcam_diag_set_ios_version((uint32_t)g_iosMajor, (uint32_t)g_iosMinor);
+        vcam_diag_reset_counters();
+
+        vcam_verify_config_readable();
 
         // 5 -- Subsystems.
         @try {
@@ -190,6 +199,7 @@ static void VCamHostInit(void) {
         } @catch (NSException *ex) {
             VCamLogE("init: subsystem setup threw %{public}@ -- not hooking",
                      ex.reason);
+            vcam_diag_set_last_error(VCamDiagErrorMetalUnavailable);
             vcam_bootguard_reset();
             return;
         }

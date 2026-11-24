@@ -8,6 +8,7 @@ TWEAK_NAME = WBFCVCamClient
 
 WBFCVCamClient_FILES      = VCamClient.x \
                              ../Shared/VCamSharedState.c \
+                             ../Shared/VCamDiagnostics.c \
                              ../Shared/VCamConfig.m
 
 WBFCVCamClient_FRAMEWORKS = Foundation AVFoundation

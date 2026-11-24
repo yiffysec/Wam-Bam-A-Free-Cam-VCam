@@ -147,6 +147,43 @@ stable from iOS 15 through 26. On top of that, before any hook is installed:
 A signature that moved in a future iOS release degrades into "this one hook is
 skipped and logged", never into a crash.
 
+### Shapes, not one shape
+
+A capture session can have several connections at different presets, and the
+still path wants BGRA where the video path wants `420v`. So every substitution
+derives its shape — width, height, pixel format — from the sample buffer it is
+replacing, rather than from one global guess. Handing a client the wrong shape
+is a documented failure mode: frames arrive as "1280×720 landscape BGRA whatever
+its preset or connection asked for."
+
+Each distinct shape gets a `CVPixelBufferPool` and one cached render per source
+frame, LRU-bounded to four shapes, so steady-state delivery allocates nothing
+and an app cycling presets cannot grow our memory without bound. The pool
+carries an allocation threshold as a jetsam guard: at the ceiling we skip the
+frame rather than risk the daemon being killed.
+
+BT.709 colour attachments go on each buffer *before* rendering, because
+CoreImage reads them when converting into a YCbCr buffer — so the pixels match
+the description rather than the description merely claiming they do.
+
+### Redundancy: tiers, and an arbiter
+
+Every way substitution can silently fail — a renamed class, a changed
+signature, an unknown sink — shows the same symptom: real frames flowing with
+none of them replaced. So that is what gets watched.
+
+| Tier | Route | When |
+|---|---|---|
+| 0 | the six sink selectors | default; format-honest, so preferred |
+| 1 | `BWNodeOutput -emitSampleBuffer:` | no sink selector could be hooked |
+| 2 | runtime discovery of any `*SinkNode` responding to the selector | nothing known exists — insurance against Apple renaming these |
+| 3 | hand off to the client side | no in-daemon route works |
+
+The arbiter samples every 2s and escalates after ~6s of evidence. Tier and
+counters are published to the companion app's **Diagnostics** screen, so the
+answer to "it doesn't work" is specific: *tier 0 installed 4 of 6 hooks and has
+replaced 0 of 1,847 frames.*
+
 ### Why third-party apps go black elsewhere
 
 `BWRemoteQueueSinkNode` feeds apps outside the daemon. Replacing frames only as
@@ -299,11 +336,8 @@ hardware.
 what works, what is missing, and what to build next, in priority order. Read it
 before relying on this or sending a patch. The short version:
 
-Confirmed gaps that will make real apps fail:
+Remaining gaps that will make some apps fail:
 
-- **Per-connection geometry and pixel format.** We derive one output size
-  globally instead of per sink invocation, so a client that asked for 640×480 or
-  for BGRA on a video path gets the wrong shape.
 - **No synthetic source or stream publication.** Some clients never build a
   capture graph without one; front-camera sessions in particular can end up with
   no device at all.
@@ -312,13 +346,11 @@ Confirmed gaps that will make real apps fail:
   session start before the graph exists.
 
 Known missing features: virtual microphone (config and UI exist, no hook yet —
-real-mic pass-through works), movie recording in Camera.app, and the
-`BWStillImageScalerNode` photo-scaling path.
+real-mic pass-through works) and movie recording in Camera.app.
 
-Missing infrastructure: there is **no redundancy**. Every capability has exactly
-one implementation, and a failed hook is logged and skipped rather than falling
-back. The audit proposes a six-tier scheme with a health arbiter; none of it is
-built yet.
+Still unsolved: per-app targeting is a single shared flag, so two apps using the
+camera at once means last writer wins. Doing it properly needs daemon-side
+client identity, which needs research.
 
 Logs go to the unified log under subsystem `com.yiffysec.wambamvcam`:
 

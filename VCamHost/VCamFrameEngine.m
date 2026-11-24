@@ -1,21 +1,21 @@
-// VCamFrameEngine.m -- 30Hz frame pump
+// VCamFrameEngine.m -- Source decode plus per-shape delivery
 #import "VCamFrameEngine.h"
+#import "VCamFrameVariant.h"
 #import "VCamMediaSource.h"
 #import "VCamPixelConverter.h"
+#import "VCamDiagnostics.h"
 #import "VCamSharedState.h"
 #import "VCamTypes.h"
 
 #import <AVFoundation/AVFoundation.h>
 #import <CoreImage/CoreImage.h>
 #import <objc/runtime.h>
-
 #include <mach/mach_time.h>
 
-// Implemented in VCamHooks.x -- pushes straight to the original sink IMP.
+// Implemented in VCamHooks.x
 extern void     vcam_push_to_remote_sink(id node, CMSampleBufferRef sb, id input);
 extern uint64_t vcam_last_natural_render(void);
 
-/// Converts mach ticks to seconds using the host's timebase.
 static double vcam_ticks_to_seconds(uint64_t ticks) {
     static mach_timebase_info_data_t tb;
     static dispatch_once_t once;
@@ -24,8 +24,8 @@ static double vcam_ticks_to_seconds(uint64_t ticks) {
     return (double)ticks * (double)tb.numer / (double)tb.denom / 1e9;
 }
 
-/// If the real graph drove a sink more recently than this, the engine stays out
-/// of the way. Two frame intervals of slack absorbs normal jitter.
+/// If the real graph drove a sink more recently than this, stay out of the way.
+/// Two frame intervals absorbs normal jitter.
 static const double kVCamStallThresholdSec = 2.0 / kVCamTargetFPS;
 
 // A weak node reference paired with the input it was last rendered for.
@@ -40,23 +40,29 @@ static const double kVCamStallThresholdSec = 2.0 / kVCamTargetFPS;
     dispatch_source_t _timer;
     dispatch_queue_t  _queue;
 
+    // -- Producer state (engine queue only) ------------------------------
     AVAssetReader            *_reader;
     AVAssetReaderTrackOutput *_trackOutput;
     BOOL                      _readerExhausted;
     CMTime                    _loopOffset;
     CMTime                    _lastPTS;
+    CGSize                    _sensorSize;
+    BOOL                      _running;
 
-    // Pre-rendered still, reused every tick for photo sources.
-    CVPixelBufferRef _still420v;
-    CVPixelBufferRef _stillBGRA;
+    // -- Source frame, shared with consumers -----------------------------
+    // The raw decoded frame before framing is applied. Consumers render it into
+    // their own shape, so framing happens per shape rather than once globally.
+    CVPixelBufferRef _sourceFrame;
+    uint64_t         _generation;
+    os_unfair_lock   _sourceLock;
 
-    // Published frames, guarded by _frameLock.
-    CVPixelBufferRef _current420v;
-    CVPixelBufferRef _currentBGRA;
-    os_unfair_lock   _frameLock;
+    // -- Variant cache, shared with consumers ----------------------------
+    NSMutableArray<VCamFrameVariant *> *_variants;
+    os_unfair_lock                      _variantLock;
 
-    // Framing, refreshed from shared state every tick.
-    CGSize       _cameraSize;
+    // -- Framing, refreshed from shared state each tick ------------------
+    // Read under _sourceLock so a consumer never renders with half-updated
+    // geometry.
     VCamRotation _rotation;
     float        _zoom;
     float        _panX, _panY;
@@ -65,9 +71,6 @@ static const double kVCamStallThresholdSec = 2.0 / kVCamTargetFPS;
 
     NSMutableArray<VCamSinkRef *> *_remoteSinks;
     os_unfair_lock                 _sinkLock;
-
-    BOOL     _running;
-    uint64_t _tickCount;
 }
 
 + (VCamFrameEngine *)sharedEngine {
@@ -79,19 +82,24 @@ static const double kVCamStallThresholdSec = 2.0 / kVCamTargetFPS;
 
 - (instancetype)init {
     if (!(self = [super init])) return nil;
-    _frameLock   = OS_UNFAIR_LOCK_INIT;
+    _sourceLock  = OS_UNFAIR_LOCK_INIT;
+    _variantLock = OS_UNFAIR_LOCK_INIT;
     _sinkLock    = OS_UNFAIR_LOCK_INIT;
     _queue       = dispatch_queue_create("com.yiffysec.vcam.frameengine",
                                           DISPATCH_QUEUE_SERIAL);
+    _variants    = [NSMutableArray arrayWithCapacity:kVCamMaxVariants];
     _remoteSinks = [NSMutableArray array];
-    _cameraSize  = CGSizeMake(1920, 1080);
+    _sensorSize  = CGSizeMake(1920, 1080);
     _zoom        = kVCamDefaultZoom;
     _loopOffset  = kCMTimeZero;
     _lastPTS     = kCMTimeZero;
     return self;
 }
 
-// -- Lifecycle -----------------------------------------------------------
+// =========================================================================
+//  Lifecycle
+// =========================================================================
+
 - (void)start {
     dispatch_async(_queue, ^{ [self startOnQueue]; });
 }
@@ -100,8 +108,8 @@ static const double kVCamStallThresholdSec = 2.0 / kVCamTargetFPS;
     if (_running) return;
 
     // Block here, not in the constructor: this is our own background queue, so
-    // waiting for Metal costs nothing but a few early frames, whereas waiting
-    // in the dylib constructor would stall cameracaptured's startup.
+    // waiting for Metal costs a few early frames, whereas waiting in the dylib
+    // constructor would stall cameracaptured's startup.
     [VCamPixelConverter.sharedConverter ensureReady];
 
     VCamSharedState st;
@@ -136,24 +144,25 @@ static const double kVCamStallThresholdSec = 2.0 / kVCamTargetFPS;
     _loopOffset      = kCMTimeZero;
     _lastPTS         = kCMTimeZero;
 
-    [self releaseStills];
+    os_unfair_lock_lock(&_sourceLock);
+    CVPixelBufferRef old = _sourceFrame;
+    _sourceFrame = NULL;
+    _generation  = 0;
+    os_unfair_lock_unlock(&_sourceLock);
+    if (old) CVPixelBufferRelease(old);
 
-    os_unfair_lock_lock(&_frameLock);
-    if (_current420v) { CVPixelBufferRelease(_current420v); _current420v = NULL; }
-    if (_currentBGRA) { CVPixelBufferRelease(_currentBGRA); _currentBGRA = NULL; }
-    os_unfair_lock_unlock(&_frameLock);
+    os_unfair_lock_lock(&_variantLock);
+    [_variants removeAllObjects];
+    os_unfair_lock_unlock(&_variantLock);
 
     os_unfair_lock_lock(&_sinkLock);
     [_remoteSinks removeAllObjects];
     os_unfair_lock_unlock(&_sinkLock);
 
+    vcam_diag_set_variant_count(0);
+
     _running = NO;
     VCamLogI("engine: stopped");
-}
-
-- (void)releaseStills {
-    if (_still420v) { CVPixelBufferRelease(_still420v); _still420v = NULL; }
-    if (_stillBGRA) { CVPixelBufferRelease(_stillBGRA); _stillBGRA = NULL; }
 }
 
 - (void)restartWithSource:(VCamMediaSource *)source {
@@ -169,22 +178,33 @@ static const double kVCamStallThresholdSec = 2.0 / kVCamTargetFPS;
         VCamSharedState st;
         vcam_shm_read(&st);
 
-        BOOL geometryChanged = (st.rotation != _rotation) ||
-                               (st.fitMode  != _fitMode);
+        BOOL framingChanged = (st.rotation != _rotation) ||
+                              (st.fitMode  != _fitMode)  ||
+                              (st.zoom     != _zoom)     ||
+                              (st.panX     != _panX)     ||
+                              (st.panY     != _panY)     ||
+                              ((st.mirrorH != 0) != _mirrorH) ||
+                              ((st.mirrorV != 0) != _mirrorV);
+
         [self adoptState:&st];
 
-        if (st.enabled && !_running)      [self startOnQueue];
-        else if (!st.enabled && _running) [self stopOnQueue];
-        else if (geometryChanged && [VCamMediaSource sharedSource].sourceType
-                                     == VCamSourcePhoto) {
-            // Stills are pre-rendered, so a framing change needs a re-render.
-            [self releaseStills];
-            [self openMedia];
+        if (st.enabled && !_running)      { [self startOnQueue]; return; }
+        if (!st.enabled && _running)      { [self stopOnQueue];  return; }
+
+        // Framing is baked into each cached render, so a framing change has to
+        // invalidate them. Bumping the generation is enough -- the next request
+        // for any shape misses its cache and re-renders.
+        if (framingChanged) {
+            os_unfair_lock_lock(&_sourceLock);
+            if (_sourceFrame) _generation++;
+            os_unfair_lock_unlock(&_sourceLock);
+            VCamLogD("engine: framing changed, caches invalidated");
         }
     });
 }
 
 - (void)adoptState:(const VCamSharedState *)st {
+    os_unfair_lock_lock(&_sourceLock);
     _rotation = st->rotation;
     _zoom     = (st->zoom > 0.0f) ? st->zoom : kVCamDefaultZoom;
     _panX     = st->panX;
@@ -192,82 +212,196 @@ static const double kVCamStallThresholdSec = 2.0 / kVCamTargetFPS;
     _mirrorH  = st->mirrorH != 0;
     _mirrorV  = st->mirrorV != 0;
     _fitMode  = st->fitMode;
+    os_unfair_lock_unlock(&_sourceLock);
 }
 
 - (void)notifyRealCameraSize:(CGSize)size {
     if (size.width < 16 || size.height < 16) return;
-
     dispatch_async(_queue, ^{
-        if (CGSizeEqualToSize(size, _cameraSize)) return;
-        _cameraSize = size;
+        if (CGSizeEqualToSize(size, _sensorSize)) return;
+        _sensorSize = size;
         VCamLogI("engine: sensor geometry now %.0fx%.0f", size.width, size.height);
-
-        // Stills are rendered to the sensor's dimensions, so re-render them.
-        if ([VCamMediaSource sharedSource].sourceType == VCamSourcePhoto) {
-            [self releaseStills];
-            [self openMedia];
-        }
     });
 }
 
-// -- Sink registry -------------------------------------------------------
-- (void)registerRemoteQueueSinkNode:(id)node input:(id)input {
-    if (!node) return;
+// =========================================================================
+//  Delivery
+// =========================================================================
 
-    os_unfair_lock_lock(&_sinkLock);
+- (BOOL)hasSourceFrame {
+    os_unfair_lock_lock(&_sourceLock);
+    BOOL has = (_sourceFrame != NULL);
+    os_unfair_lock_unlock(&_sourceLock);
+    return has;
+}
 
-    BOOL known = NO;
-    NSMutableIndexSet *dead = [NSMutableIndexSet indexSet];
-    for (NSUInteger i = 0; i < _remoteSinks.count; i++) {
-        VCamSinkRef *ref = _remoteSinks[i];
-        if (!ref.node)        { [dead addIndex:i]; continue; }
-        if (ref.node == node) { ref.input = input; known = YES; }
+- (NSUInteger)variantCount {
+    os_unfair_lock_lock(&_variantLock);
+    NSUInteger n = _variants.count;
+    os_unfair_lock_unlock(&_variantLock);
+    return n;
+}
+
+- (CVPixelBufferRef)frameForSampleBuffer:(CMSampleBufferRef)sb
+                          fallbackFormat:(OSType)fallbackFormat {
+    size_t width  = 0, height = 0;
+    OSType format = 0;
+
+    // Preference order matters. The image buffer is ground truth: it is the
+    // exact shape this connection is receiving right now. The format
+    // description is next best. The sensor default is a last resort and is
+    // usually wrong for anything but the viewfinder.
+    if (sb) {
+        CVPixelBufferRef original = CMSampleBufferGetImageBuffer(sb);
+        if (original) {
+            width  = CVPixelBufferGetWidth(original);
+            height = CVPixelBufferGetHeight(original);
+            format = CVPixelBufferGetPixelFormatType(original);
+        } else {
+            CMFormatDescriptionRef desc = CMSampleBufferGetFormatDescription(sb);
+            if (desc && CMFormatDescriptionGetMediaType(desc) == kCMMediaType_Video) {
+                CMVideoDimensions dims = CMVideoFormatDescriptionGetDimensions(desc);
+                width  = (size_t)dims.width;
+                height = (size_t)dims.height;
+                format = CMFormatDescriptionGetMediaSubType(desc);
+            }
+        }
     }
-    [_remoteSinks removeObjectsAtIndexes:dead];
 
-    if (!known) {
-        VCamSinkRef *ref = [VCamSinkRef new];
-        ref.node  = node;
-        ref.input = input;
-        [_remoteSinks addObject:ref];
+    if (width == 0 || height == 0) {
+        width  = (size_t)_sensorSize.width;
+        height = (size_t)_sensorSize.height;
+    }
+    if (format == 0 || ![VCamFrameVariant supportsPixelFormat:format]) {
+        // An unsupported subtype here usually means a compressed payload (a
+        // JPEG or HEIC still). Fall back to what this sink class wants; if that
+        // is also unsupported, frameForWidth: declines and the real frame goes
+        // through untouched.
+        format = fallbackFormat;
     }
 
-    os_unfair_lock_unlock(&_sinkLock);
+    return [self frameForWidth:width height:height pixelFormat:format];
 }
 
-// -- Published frames ----------------------------------------------------
-- (CVPixelBufferRef)currentFrame420v {
-    os_unfair_lock_lock(&_frameLock);
-    CVPixelBufferRef r = _current420v;
-    if (r) CVPixelBufferRetain(r);
-    os_unfair_lock_unlock(&_frameLock);
-    return r;
+- (CVPixelBufferRef)frameForWidth:(size_t)width
+                           height:(size_t)height
+                      pixelFormat:(OSType)pixelFormat {
+    if (![VCamFrameVariant supportsPixelFormat:pixelFormat]) {
+        vcam_diag_note_declined_format(pixelFormat);
+        return NULL;
+    }
+
+    // Snapshot the source and the framing together, so a configuration change
+    // mid-render cannot produce a half-transformed frame.
+    os_unfair_lock_lock(&_sourceLock);
+    CVPixelBufferRef source = _sourceFrame;
+    if (source) CVPixelBufferRetain(source);
+    uint64_t generation = _generation;
+    VCamRotation rotation = _rotation;
+    float zoom = _zoom, panX = _panX, panY = _panY;
+    BOOL mirrorH = _mirrorH, mirrorV = _mirrorV;
+    VCamFitMode fitMode = _fitMode;
+    os_unfair_lock_unlock(&_sourceLock);
+
+    if (!source || generation == 0) return NULL;
+
+    VCamFrameVariant *variant = [self variantForWidth:width
+                                                height:height
+                                           pixelFormat:pixelFormat];
+    if (!variant) { CVPixelBufferRelease(source); return NULL; }
+
+    // Fast path: this shape was already rendered from this source frame.
+    CVPixelBufferRef cached = [variant cachedBufferForGeneration:generation];
+    if (cached) {
+        CVPixelBufferRelease(source);
+        vcam_diag_note_cache_hit();
+        return cached;
+    }
+
+    CVPixelBufferRef out = [variant newPooledBuffer];
+    if (!out) { CVPixelBufferRelease(source); return NULL; }
+
+    BOOL ok = [self renderSource:source
+                            into:out
+                        rotation:rotation
+                            zoom:zoom
+                            panX:panX
+                            panY:panY
+                         mirrorH:mirrorH
+                         mirrorV:mirrorV
+                         fitMode:fitMode];
+
+    CVPixelBufferRelease(source);
+
+    if (!ok) { CVPixelBufferRelease(out); return NULL; }
+
+    [variant cacheBuffer:out generation:generation];
+    vcam_diag_note_render();
+    return out;   // caller releases
 }
 
-- (CVPixelBufferRef)currentFrameBGRA {
-    os_unfair_lock_lock(&_frameLock);
-    CVPixelBufferRef r = _currentBGRA;
-    if (r) CVPixelBufferRetain(r);
-    os_unfair_lock_unlock(&_frameLock);
-    return r;
+/// Finds or creates the variant for a shape, evicting the least recently used
+/// one when the cache is full.
+- (VCamFrameVariant *)variantForWidth:(size_t)width
+                                height:(size_t)height
+                           pixelFormat:(OSType)pixelFormat {
+    // Planar formats were rounded down to even in the variant, so match on the
+    // same rounding or every request would miss.
+    if (pixelFormat == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ||
+        pixelFormat == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange) {
+        width  &= ~(size_t)1;
+        height &= ~(size_t)1;
+    }
+
+    os_unfair_lock_lock(&_variantLock);
+
+    VCamFrameVariant *found = nil;
+    for (VCamFrameVariant *v in _variants) {
+        if (v.width == width && v.height == height &&
+            v.pixelFormat == pixelFormat) {
+            found = v;
+            break;
+        }
+    }
+
+    if (found) {
+        [found touch];
+        os_unfair_lock_unlock(&_variantLock);
+        return found;
+    }
+
+    if (_variants.count >= kVCamMaxVariants) {
+        NSUInteger lruIndex = 0;
+        uint64_t   oldest   = UINT64_MAX;
+        for (NSUInteger i = 0; i < _variants.count; i++) {
+            uint64_t t = _variants[i].lastUsed;
+            if (t < oldest) { oldest = t; lruIndex = i; }
+        }
+        VCamFrameVariant *evicted = _variants[lruIndex];
+        VCamLogI("engine: evicting variant %zux%zu %{public}s",
+                 evicted.width, evicted.height,
+                 [VCamFrameVariant describeFormat:evicted.pixelFormat]);
+        [_variants removeObjectAtIndex:lruIndex];
+    }
+
+    VCamFrameVariant *fresh = [[VCamFrameVariant alloc] initWithWidth:width
+                                                                height:height
+                                                           pixelFormat:pixelFormat];
+    if (fresh) [_variants addObject:fresh];
+
+    NSUInteger count = _variants.count;
+    os_unfair_lock_unlock(&_variantLock);
+
+    vcam_diag_set_variant_count((uint32_t)count);
+    return fresh;
 }
 
-- (void)publish420v:(CVPixelBufferRef)v bgra:(CVPixelBufferRef)b {
-    os_unfair_lock_lock(&_frameLock);
-    CVPixelBufferRef old420 = _current420v;
-    CVPixelBufferRef oldBGRA = _currentBGRA;
-    _current420v = v ? (CVPixelBufferRetain(v), v) : NULL;
-    _currentBGRA = b ? (CVPixelBufferRetain(b), b) : NULL;
-    os_unfair_lock_unlock(&_frameLock);
+// =========================================================================
+//  Producer
+// =========================================================================
 
-    // Release outside the lock: a sink may still be draining the old buffer.
-    if (old420)  CVPixelBufferRelease(old420);
-    if (oldBGRA) CVPixelBufferRelease(oldBGRA);
-}
-
-// -- Media opening -------------------------------------------------------
 - (void)openMedia {
-    VCamMediaSource *src = [VCamMediaSource sharedSource];
+    VCamMediaSource *src = VCamMediaSource.sharedSource;
 
     switch (src.sourceType) {
         case VCamSourceNone:
@@ -291,19 +425,40 @@ static const double kVCamStallThresholdSec = 2.0 / kVCamTargetFPS;
         return;
     }
 
-    CGSize target = [self outputSize];
-    CVPixelBufferRef v = [self render:img toFormat:kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
-                                 size:target];
-    CVPixelBufferRef b = [self render:img toFormat:kCVPixelFormatType_32BGRA
-                                 size:target];
-    if (!v && !b) return;
+    CGRect e = img.extent;
+    if (CGRectIsEmpty(e) || CGRectIsInfinite(e)) {
+        VCamLogE("engine: still has no usable extent");
+        return;
+    }
 
-    [self releaseStills];
-    _still420v = v;   // owned
-    _stillBGRA = b;   // owned
+    // The still becomes the source frame at its own native size. Framing to
+    // each client's shape happens on delivery, as for video.
+    CVPixelBufferRef src =
+        [self newSourceBufferWidth:(size_t)e.size.width
+                            height:(size_t)e.size.height];
+    if (!src) return;
 
-    [self publish420v:v bgra:b];
-    VCamLogI("engine: still ready at %.0fx%.0f", target.width, target.height);
+    CIContext *ctx = VCamPixelConverter.sharedConverter.ciContext;
+    if (!ctx) { CVPixelBufferRelease(src); return; }
+
+    // Normalise the extent to the origin before rendering.
+    if (e.origin.x != 0 || e.origin.y != 0) {
+        img = [img imageByApplyingTransform:
+               CGAffineTransformMakeTranslation(-e.origin.x, -e.origin.y)];
+    }
+
+    @try {
+        [ctx render:img toCVPixelBuffer:src];
+    } @catch (NSException *ex) {
+        VCamLogE("engine: still render threw %{public}@", ex.reason);
+        CVPixelBufferRelease(src);
+        return;
+    }
+
+    [self publishSource:src];
+    CVPixelBufferRelease(src);
+
+    VCamLogI("engine: still ready at %.0fx%.0f", e.size.width, e.size.height);
 }
 
 - (void)openReader:(NSURL *)url {
@@ -323,19 +478,21 @@ static const double kVCamStallThresholdSec = 2.0 / kVCamTargetFPS;
         return;
     }
 
-    // Ask the decoder for 420v directly. Decoding straight into the format the
-    // sinks require avoids a per-frame conversion for the common case.
+    // Decode straight to BGRA. The source frame is an intermediate that gets
+    // re-rendered per shape anyway, and BGRA keeps the CoreImage path simple
+    // and lossless through rotation and scaling. The YCbCr conversion happens
+    // once, on the way into each client's buffer.
     AVAssetReaderTrackOutput *out = [AVAssetReaderTrackOutput
         assetReaderTrackOutputWithTrack:tracks.firstObject
                          outputSettings:@{
-            (NSString *)kCVPixelBufferPixelFormatTypeKey:
-                @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
+            (NSString *)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
             (NSString *)kCVPixelBufferIOSurfacePropertiesKey: @{},
+            (NSString *)kCVPixelBufferMetalCompatibilityKey:  @YES,
         }];
     out.alwaysCopiesSampleData = NO;
 
     if (![reader canAddOutput:out]) {
-        VCamLogE("engine: reader rejected 420v output");
+        VCamLogE("engine: reader rejected BGRA output");
         return;
     }
     [reader addOutput:out];
@@ -352,7 +509,42 @@ static const double kVCamStallThresholdSec = 2.0 / kVCamTargetFPS;
     VCamLogI("engine: reader open for %{public}@", url.lastPathComponent);
 }
 
-// -- Timer ---------------------------------------------------------------
+- (CVPixelBufferRef)newSourceBufferWidth:(size_t)w height:(size_t)h
+                                          CF_RETURNS_RETAINED {
+    if (w < 16 || h < 16 || w > 8192 || h > 8192) return NULL;
+
+    CVPixelBufferRef buf = NULL;
+    NSDictionary *attrs = @{
+        (NSString *)kCVPixelBufferPixelFormatTypeKey:      @(kCVPixelFormatType_32BGRA),
+        (NSString *)kCVPixelBufferWidthKey:                 @(w),
+        (NSString *)kCVPixelBufferHeightKey:                @(h),
+        (NSString *)kCVPixelBufferIOSurfacePropertiesKey:   @{},
+        (NSString *)kCVPixelBufferMetalCompatibilityKey:    @YES,
+    };
+    CVReturn err = CVPixelBufferCreate(kCFAllocatorDefault, w, h,
+                                        kCVPixelFormatType_32BGRA,
+                                        (__bridge CFDictionaryRef)attrs, &buf);
+    if (err != kCVReturnSuccess) {
+        VCamLogE("engine: source buffer create failed cv=%d", (int)err);
+        return NULL;
+    }
+    return buf;
+}
+
+- (void)publishSource:(CVPixelBufferRef)frame {
+    if (!frame) return;
+    CVPixelBufferRetain(frame);
+
+    os_unfair_lock_lock(&_sourceLock);
+    CVPixelBufferRef old = _sourceFrame;
+    _sourceFrame = frame;
+    _generation++;
+    if (_generation == 0) _generation = 1;   // 0 means "nothing cached"
+    os_unfair_lock_unlock(&_sourceLock);
+
+    if (old) CVPixelBufferRelease(old);
+}
+
 - (void)installTimer {
     if (_timer) { dispatch_source_cancel(_timer); _timer = nil; }
 
@@ -381,27 +573,21 @@ static const double kVCamStallThresholdSec = 2.0 / kVCamTargetFPS;
     } @catch (NSException *ex) {
         VCamLogE("engine: tick threw %{public}@", ex.reason);
     }
-
-    _tickCount++;
 }
 
 - (void)decodeNextFrame {
-    VCamMediaSource *src = [VCamMediaSource sharedSource];
+    VCamMediaSource *src = VCamMediaSource.sharedSource;
 
     if (src.sourceType == VCamSourceNone) return;
 
+    // A still is published once and stays current; nothing to decode per tick.
     if (src.sourceType == VCamSourcePhoto) {
-        // Already published; nothing to decode. Re-publish if a consumer
-        // somehow drained the slot.
-        os_unfair_lock_lock(&_frameLock);
-        BOOL empty = (_current420v == NULL);
-        os_unfair_lock_unlock(&_frameLock);
-        if (empty && _still420v) [self publish420v:_still420v bgra:_stillBGRA];
+        if (![self hasSourceFrame]) [self loadStill:src.mediaURL];
         return;
     }
 
     if (!_reader || _readerExhausted) {
-        // Seamless loop: tear the reader down and reopen from the top.
+        // Seamless loop: tear down and reopen from the top.
         [_reader cancelReading];
         _reader      = nil;
         _trackOutput = nil;
@@ -411,42 +597,67 @@ static const double kVCamStallThresholdSec = 2.0 / kVCamTargetFPS;
     }
 
     CMSampleBufferRef sb = [_trackOutput copyNextSampleBuffer];
-    if (!sb) {
-        _readerExhausted = YES;
-        return;
-    }
+    if (!sb) { _readerExhausted = YES; return; }
 
     CVPixelBufferRef decoded = CMSampleBufferGetImageBuffer(sb);
     if (!decoded) { CFRelease(sb); return; }
 
-    // Reject a planar buffer missing its chroma plane. Handing one of these to
-    // a 420v sink is a classic cause of a green or black preview.
-    if (CVPixelBufferGetPixelFormatType(decoded) ==
-            kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange &&
-        CVPixelBufferGetPlaneCount(decoded) < 2) {
-        VCamLogE("engine: dropping truncated planar frame (planes=%zu)",
-                 CVPixelBufferGetPlaneCount(decoded));
-        CFRelease(sb);
-        return;
-    }
-
     CMTime pts = CMSampleBufferGetPresentationTimeStamp(sb);
     if (CMTIME_IS_VALID(pts)) _lastPTS = CMTimeAdd(pts, _loopOffset);
 
-    CVPixelBufferRef framed = [self applyFraming:decoded];
+    // The decoded buffer belongs to the reader's pool and is recycled as soon
+    // as the sample buffer is released, so it has to be copied rather than
+    // retained. The copy is also what lets consumers read it off-queue.
+    CVPixelBufferRef source =
+        [self newSourceBufferWidth:CVPixelBufferGetWidth(decoded)
+                            height:CVPixelBufferGetHeight(decoded)];
+    if (!source) { CFRelease(sb); return; }
+
+    CIContext *ctx = VCamPixelConverter.sharedConverter.ciContext;
+    if (!ctx) { CVPixelBufferRelease(source); CFRelease(sb); return; }
+
+    CIImage *img = [CIImage imageWithCVPixelBuffer:decoded];
+    if (img) {
+        @try {
+            [ctx render:img toCVPixelBuffer:source];
+            [self publishSource:source];
+        } @catch (NSException *ex) {
+            VCamLogE("engine: source render threw %{public}@", ex.reason);
+        }
+    }
+
+    CVPixelBufferRelease(source);
     CFRelease(sb);
-
-    if (!framed) return;
-
-    CVPixelBufferRef bgra = [VCamPixelConverter.sharedConverter convertToBGRA:framed];
-
-    [self publish420v:framed bgra:bgra];
-
-    CVPixelBufferRelease(framed);
-    if (bgra) CVPixelBufferRelease(bgra);
 }
 
-// -- Independent 30Hz drive of remote sinks ------------------------------
+// =========================================================================
+//  Independent 30Hz drive
+// =========================================================================
+
+- (void)registerRemoteQueueSinkNode:(id)node input:(id)input {
+    if (!node) return;
+
+    os_unfair_lock_lock(&_sinkLock);
+
+    BOOL known = NO;
+    NSMutableIndexSet *dead = [NSMutableIndexSet indexSet];
+    for (NSUInteger i = 0; i < _remoteSinks.count; i++) {
+        VCamSinkRef *ref = _remoteSinks[i];
+        if (!ref.node)        { [dead addIndex:i]; continue; }
+        if (ref.node == node) { ref.input = input; known = YES; }
+    }
+    [_remoteSinks removeObjectsAtIndexes:dead];
+
+    if (!known) {
+        VCamSinkRef *ref = [VCamSinkRef new];
+        ref.node  = node;
+        ref.input = input;
+        [_remoteSinks addObject:ref];
+    }
+
+    os_unfair_lock_unlock(&_sinkLock);
+}
+
 - (void)driveRemoteSinks {
     os_unfair_lock_lock(&_sinkLock);
     NSArray<VCamSinkRef *> *sinks = [_remoteSinks copy];
@@ -454,9 +665,9 @@ static const double kVCamStallThresholdSec = 2.0 / kVCamTargetFPS;
 
     if (!sinks.count) return;
 
-    // Only step in when the real graph has gone quiet. While it is pulling
-    // normally the hook is already substituting every frame, and pushing here
-    // too would deliver each frame twice.
+    // Only step in once the real graph has gone quiet. While it is pulling, the
+    // hook is already substituting every frame and pushing here too would
+    // deliver each frame twice.
     uint64_t last = vcam_last_natural_render();
     if (last != 0) {
         uint64_t now = mach_absolute_time();
@@ -466,7 +677,13 @@ static const double kVCamStallThresholdSec = 2.0 / kVCamTargetFPS;
         }
     }
 
-    CVPixelBufferRef frame = [self currentFrame420v];
+    // Without a real sample buffer to copy a shape from, the sensor geometry in
+    // 420v is the best available guess -- this path exists precisely because
+    // the graph is not delivering anything to measure.
+    CVPixelBufferRef frame =
+        [self frameForWidth:(size_t)_sensorSize.width
+                     height:(size_t)_sensorSize.height
+                pixelFormat:kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange];
     if (!frame) return;
 
     CMVideoFormatDescriptionRef fmt = NULL;
@@ -492,71 +709,89 @@ static const double kVCamStallThresholdSec = 2.0 / kVCamTargetFPS;
     if (err != noErr || !sb) return;
 
     for (VCamSinkRef *ref in sinks) {
-        id node = ref.node;
-        if (node) vcam_push_to_remote_sink(node, sb, ref.input);
+        id node  = ref.node;
+        id input = ref.input;
+        // A nil input is not something the original implementation is obliged
+        // to tolerate, so skip rather than guess.
+        if (node && input) {
+            vcam_push_to_remote_sink(node, sb, input);
+            vcam_diag_note_driven_frame();
+        }
     }
 
     CFRelease(sb);
 }
 
-// -- Framing -------------------------------------------------------------
-- (CGSize)outputSize {
-    // Output must match the sensor exactly. Rotation by a quarter turn swaps
-    // the axes of the source, not of the destination -- the destination is
-    // always the sensor's own geometry.
-    return _cameraSize;
-}
+// =========================================================================
+//  Framing
+// =========================================================================
 
-- (CVPixelBufferRef)applyFraming:(CVPixelBufferRef)src CF_RETURNS_RETAINED {
-    if (!src) return NULL;
+/// Renders the source frame into `dest`, applying rotation, mirroring, zoom and
+/// pan, then fitting to the destination's own dimensions.
+- (BOOL)renderSource:(CVPixelBufferRef)source
+                into:(CVPixelBufferRef)dest
+            rotation:(VCamRotation)rotation
+                zoom:(float)zoom
+                panX:(float)panX
+                panY:(float)panY
+             mirrorH:(BOOL)mirrorH
+             mirrorV:(BOOL)mirrorV
+             fitMode:(VCamFitMode)fitMode {
+    CIContext *ctx = VCamPixelConverter.sharedConverter.ciContext;
+    if (!ctx || !source || !dest) return NO;
 
-    CGSize target = [self outputSize];
-    CIImage *img  = [CIImage imageWithCVPixelBuffer:src];
-    if (!img) return NULL;
+    CIImage *img = [CIImage imageWithCVPixelBuffer:source];
+    if (!img) return NO;
 
-    // 1. Rotation (about the image's own centre).
-    if (_rotation != VCamRotation0) {
+    CGSize target = CGSizeMake(CVPixelBufferGetWidth(dest),
+                               CVPixelBufferGetHeight(dest));
+
+    // 1 -- Rotation about the image's own centre.
+    if (rotation != VCamRotation0) {
         CGFloat radians = 0;
-        switch (_rotation) {
+        switch (rotation) {
             case VCamRotation90:  radians = -M_PI_2; break;
             case VCamRotation180: radians =  M_PI;   break;
             case VCamRotation270: radians =  M_PI_2; break;
             default: break;
         }
-        img = [img imageByApplyingTransform:CGAffineTransformMakeRotation(radians)];
-        img = [self normalizeOrigin:img];
+        img = [self normalizeOrigin:
+               [img imageByApplyingTransform:CGAffineTransformMakeRotation(radians)]];
     }
 
-    // 2. Mirroring.
-    if (_mirrorH || _mirrorV) {
-        CGAffineTransform m = CGAffineTransformMakeScale(_mirrorH ? -1 : 1,
-                                                          _mirrorV ? -1 : 1);
-        img = [img imageByApplyingTransform:m];
-        img = [self normalizeOrigin:img];
+    // 2 -- Mirroring.
+    if (mirrorH || mirrorV) {
+        img = [self normalizeOrigin:
+               [img imageByApplyingTransform:
+                CGAffineTransformMakeScale(mirrorH ? -1 : 1, mirrorV ? -1 : 1)]];
     }
 
-    // 3. Zoom and pan: crop a window out of the source, then fit that window.
-    if (_zoom > 1.001f || _panX != 0.0f || _panY != 0.0f) {
+    // 3 -- Zoom and pan: crop a window, then let step 4 scale it up.
+    if (zoom > 1.001f || panX != 0.0f || panY != 0.0f) {
         CGRect e = img.extent;
-        CGFloat cw = e.size.width  / _zoom;
-        CGFloat ch = e.size.height / _zoom;
+        CGFloat cw = e.size.width  / zoom;
+        CGFloat ch = e.size.height / zoom;
         CGFloat maxDX = (e.size.width  - cw) / 2.0;
         CGFloat maxDY = (e.size.height - ch) / 2.0;
-        CGFloat cx = e.origin.x + maxDX + _panX * maxDX;
-        CGFloat cy = e.origin.y + maxDY + _panY * maxDY;
-        img = [img imageByCroppingToRect:CGRectMake(cx, cy, cw, ch)];
-        img = [self normalizeOrigin:img];
+        CGFloat cx = e.origin.x + maxDX + panX * maxDX;
+        CGFloat cy = e.origin.y + maxDY + panY * maxDY;
+        img = [self normalizeOrigin:
+               [img imageByCroppingToRect:CGRectMake(cx, cy, cw, ch)]];
     }
 
-    // 4. Fit the result into the sensor's frame.
-    img = [self fit:img into:target];
+    // 4 -- Fit to the destination.
+    img = [self fit:img into:target mode:fitMode];
+    if (!img) return NO;
 
-    return [self render:img
-               toFormat:kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
-                   size:target];
+    @try {
+        [ctx render:img toCVPixelBuffer:dest];
+    } @catch (NSException *ex) {
+        VCamLogE("engine: render threw %{public}@", ex.reason);
+        return NO;
+    }
+    return YES;
 }
 
-/// Moves an image's extent back to the origin after a transform.
 - (CIImage *)normalizeOrigin:(CIImage *)img {
     CGRect e = img.extent;
     if (e.origin.x == 0 && e.origin.y == 0) return img;
@@ -564,79 +799,39 @@ static const double kVCamStallThresholdSec = 2.0 / kVCamTargetFPS;
             CGAffineTransformMakeTranslation(-e.origin.x, -e.origin.y)];
 }
 
-- (CIImage *)fit:(CIImage *)img into:(CGSize)target {
+- (CIImage *)fit:(CIImage *)img into:(CGSize)target mode:(VCamFitMode)mode {
     CGRect e = img.extent;
-    if (CGRectIsEmpty(e) || CGRectIsInfinite(e)) return img;
+    if (CGRectIsEmpty(e) || CGRectIsInfinite(e)) return nil;
 
     CGFloat sx = target.width  / e.size.width;
     CGFloat sy = target.height / e.size.height;
 
-    if (_fitMode == VCamFitStretch) {
-        img = [img imageByApplyingTransform:CGAffineTransformMakeScale(sx, sy)];
-        img = [self normalizeOrigin:img];
+    if (mode == VCamFitStretch) {
+        img = [self normalizeOrigin:
+               [img imageByApplyingTransform:CGAffineTransformMakeScale(sx, sy)]];
     } else {
-        CGFloat s = (_fitMode == VCamFitFill) ? MAX(sx, sy) : MIN(sx, sy);
-        img = [img imageByApplyingTransform:CGAffineTransformMakeScale(s, s)];
-        img = [self normalizeOrigin:img];
+        CGFloat s = (mode == VCamFitFill) ? MAX(sx, sy) : MIN(sx, sy);
+        img = [self normalizeOrigin:
+               [img imageByApplyingTransform:CGAffineTransformMakeScale(s, s)]];
 
-        // Centre within the target.
         CGRect scaled = img.extent;
         CGFloat dx = (target.width  - scaled.size.width)  / 2.0;
         CGFloat dy = (target.height - scaled.size.height) / 2.0;
-        img = [img imageByApplyingTransform:CGAffineTransformMakeTranslation(dx, dy)];
+        img = [img imageByApplyingTransform:
+               CGAffineTransformMakeTranslation(dx, dy)];
 
-        // Fit mode leaves bars; composite over black so the sink never receives
-        // undefined pixels outside the image's extent.
-        if (_fitMode == VCamFitFit) {
-            CIImage *black = [[CIImage imageWithColor:
-                               [CIColor colorWithRed:0 green:0 blue:0 alpha:1]]
-                              imageByCroppingToRect:
-                                  CGRectMake(0, 0, target.width, target.height)];
+        // Fit leaves bars. Composite over real black so the destination never
+        // receives undefined pixels outside the image's extent -- an infinite
+        // or undefined extent is one of the ways a sink ends up showing noise.
+        if (mode == VCamFitFit) {
+            CIImage *black =
+                [[CIImage imageWithColor:[CIColor colorWithRed:0 green:0 blue:0 alpha:1]]
+                 imageByCroppingToRect:CGRectMake(0, 0, target.width, target.height)];
             img = [img imageByCompositingOverImage:black];
         }
     }
 
     return [img imageByCroppingToRect:CGRectMake(0, 0, target.width, target.height)];
-}
-
-- (CVPixelBufferRef)render:(CIImage *)img
-                  toFormat:(OSType)format
-                      size:(CGSize)size CF_RETURNS_RETAINED {
-    if (!img || size.width < 1 || size.height < 1) return NULL;
-
-    // 420v requires even dimensions for the half-resolution chroma plane.
-    size_t w = (size_t)size.width  & ~1UL;
-    size_t h = (size_t)size.height & ~1UL;
-    if (w < 2 || h < 2) return NULL;
-
-    CVPixelBufferRef out = NULL;
-    NSDictionary *attrs = @{
-        (NSString *)kCVPixelBufferPixelFormatTypeKey:       @(format),
-        (NSString *)kCVPixelBufferWidthKey:                 @(w),
-        (NSString *)kCVPixelBufferHeightKey:                @(h),
-        (NSString *)kCVPixelBufferIOSurfacePropertiesKey:   @{},
-        (NSString *)kCVPixelBufferMetalCompatibilityKey:    @YES,
-    };
-
-    CVReturn cvErr = CVPixelBufferCreate(kCFAllocatorDefault, w, h, format,
-                                          (__bridge CFDictionaryRef)attrs, &out);
-    if (cvErr != kCVReturnSuccess || !out) {
-        VCamLogE("engine: CVPixelBufferCreate failed cv=%d", (int)cvErr);
-        return NULL;
-    }
-
-    CIContext *ctx = VCamPixelConverter.sharedConverter.ciContext;
-    if (!ctx) { CVPixelBufferRelease(out); return NULL; }
-
-    @try {
-        [ctx render:img toCVPixelBuffer:out];
-    } @catch (NSException *ex) {
-        VCamLogE("engine: CIContext render threw %{public}@", ex.reason);
-        CVPixelBufferRelease(out);
-        return NULL;
-    }
-
-    return out;
 }
 
 @end

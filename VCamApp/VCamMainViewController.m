@@ -1,6 +1,8 @@
 // VCamMainViewController.m -- Companion app root control surface
 #import "VCamMainViewController.h"
 #import "VCamPerAppViewController.h"
+#import "VCamDiagnosticsViewController.h"
+#import "../Shared/VCamDiagnostics.h"
 #import "../Shared/VCamConfig.h"
 #import "../Shared/VCamHUDBridge.h"
 #import "../Shared/VCamBootGuard.h"
@@ -305,7 +307,36 @@ typedef NS_ENUM(NSInteger, VCamRowKind) {
             if (!cfg.enabled)             return @"Off";
             if (cfg.paused)               return @"Paused";
             if (cfg.sourceType == VCamSourceNone) return @"No media selected";
-            return @"Active";
+
+            // "Active" is a claim about the daemon, so check the daemon rather
+            // than our own config. Frames flowing with none replaced is the one
+            // symptom common to every way substitution silently fails.
+            VCamDiagnostics d;
+            vcam_diag_read(&d);
+            uint64_t seen      = atomic_load(&d.framesSeen);
+            uint64_t delivered = atomic_load(&d.framesReplaced) +
+                                 atomic_load(&d.framesDriven);
+            uint32_t pid       = atomic_load(&d.daemonPid);
+
+            if (pid == 0)                 return @"Daemon not injected";
+            if (seen > 0 && delivered == 0) return @"Not substituting";
+            if (delivered > 0)            return @"Active";
+            return @"Waiting for camera";
+        }],
+        [VCamRow disclosureRow:@"Diagnostics"
+                         value:^NSString * {
+            VCamDiagnostics d;
+            vcam_diag_read(&d);
+            uint32_t tier = atomic_load(&d.activeTier);
+            if (atomic_load(&d.daemonPid) == 0) return @"No daemon";
+            return tier == VCamTierSinkHooks
+                     ? nil
+                     : [NSString stringWithFormat:@"tier %u", tier];
+        }
+                        action:^{
+            [weakSelf.navigationController
+                pushViewController:[[VCamDiagnosticsViewController alloc] init]
+                          animated:YES];
         }],
     ]]];
 

@@ -23,9 +23,11 @@ TWEAK_NAME = WBFCVCamHost
 WBFCVCamHost_FILES = VCamHost/VCamHostMain.x \
                      VCamHost/VCamHooks.x \
                      VCamHost/VCamFrameEngine.m \
+                     VCamHost/VCamFrameVariant.m \
                      VCamHost/VCamPixelConverter.m \
                      VCamHost/VCamMediaSource.m \
                      Shared/VCamSharedState.c \
+                     Shared/VCamDiagnostics.c \
                      Shared/VCamBootGuard.m
 
 WBFCVCamHost_FRAMEWORKS = AVFoundation CoreMedia CoreVideo CoreImage \

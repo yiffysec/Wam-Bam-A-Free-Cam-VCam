@@ -20,8 +20,9 @@
 #define kVCamStateBodyOffset (offsetof(VCamSharedState, enabled))
 #define kVCamStateBodySize   (sizeof(VCamSharedState) - kVCamStateBodyOffset)
 
-static VCamSharedState *g_shm   = NULL;
-static size_t           g_shmsz = 0;
+static VCamSharedRegion *g_region = NULL;
+static VCamSharedState  *g_shm    = NULL;   // &g_region->state, for brevity
+static size_t            g_shmsz  = 0;
 
 static void vcam_shm_reinit_locked(void);
 
@@ -37,7 +38,7 @@ int vcam_shm_open(void) {
         return -1;
     }
 
-    g_shmsz = sizeof(VCamSharedState);
+    g_shmsz = sizeof(VCamSharedRegion);
 
     struct stat st;
     if (fstat(fd, &st) == 0 && (size_t)st.st_size < g_shmsz) {
@@ -56,7 +57,8 @@ int vcam_shm_open(void) {
         return -1;
     }
 
-    g_shm = (VCamSharedState *)map;
+    g_region = (VCamSharedRegion *)map;
+    g_shm    = &g_region->state;
 
     // Validate the header. A fresh file reads as all zeroes, and a file written
     // by a different build of this struct reads as the wrong layout -- in which
@@ -64,14 +66,14 @@ int vcam_shm_open(void) {
     // trust it.
     if (g_shm->magic      != kVCamShmMagic   ||
         g_shm->version    != kVCamShmVersion ||
-        g_shm->structSize != (uint16_t)sizeof(VCamSharedState)) {
+        g_shm->structSize != (uint16_t)sizeof(VCamSharedRegion)) {
 
         if (g_shm->magic != 0 || g_shm->version != 0) {
             VCamLogI("shm_open: header mismatch "
                      "(magic=0x%08x ver=%u size=%u; expected 0x%08x/%u/%zu) -- "
                      "reinitialising",
                      g_shm->magic, g_shm->version, g_shm->structSize,
-                     kVCamShmMagic, kVCamShmVersion, sizeof(VCamSharedState));
+                     kVCamShmMagic, kVCamShmVersion, sizeof(VCamSharedRegion));
         }
         vcam_shm_reinit_locked();
     }
@@ -87,13 +89,13 @@ int vcam_shm_open(void) {
 // the HUD disabled and the microphone replaced, neither of which is a sane
 // default for a fresh install.
 static void vcam_shm_reinit_locked(void) {
-    if (!g_shm) return;
+    if (!g_region) return;
 
-    memset(g_shm, 0, sizeof(VCamSharedState));
+    memset(g_region, 0, sizeof(VCamSharedRegion));
 
     g_shm->magic      = kVCamShmMagic;
     g_shm->version    = kVCamShmVersion;
-    g_shm->structSize = (uint16_t)sizeof(VCamSharedState);
+    g_shm->structSize = (uint16_t)sizeof(VCamSharedRegion);
 
     g_shm->zoom         = kVCamDefaultZoom;
     g_shm->hudEnabled   = 1;
@@ -105,16 +107,21 @@ static void vcam_shm_reinit_locked(void) {
 
 // -- vcam_shm_close -------------------------------------------------------
 void vcam_shm_close(void) {
-    if (g_shm) {
-        munmap(g_shm, g_shmsz);
-        g_shm   = NULL;
-        g_shmsz = 0;
+    if (g_region) {
+        munmap(g_region, g_shmsz);
+        g_region = NULL;
+        g_shm    = NULL;
+        g_shmsz  = 0;
     }
 }
 
 // -- vcam_shm_ptr ---------------------------------------------------------
 VCamSharedState *vcam_shm_ptr(void) {
     return g_shm;
+}
+
+VCamDiagnostics *vcam_shm_diag_ptr(void) {
+    return g_region ? &g_region->diag : NULL;
 }
 
 // -- vcam_shm_read (seqlock read) -----------------------------------------

@@ -281,28 +281,46 @@ virtual camera is actually running, never on load.
 
 ## 7. Priority order
 
-**P0 — safety and silent failure (this commit)**
-1. Metal setup out of the constructor (§3.1)
-2. libSandy actually applied (§3.2)
-3. shared-memory magic and version (§3.3)
+**P0 — safety and silent failure — DONE**
+1. ✅ Metal setup out of the constructor (§3.1). The compute kernel turned out
+   to be dead code as well, so the runtime shader compile is gone entirely and
+   `VCamPixelConverter` is now just the shared `CIContext`.
+2. ✅ libSandy actually applied (§3.2), via `dlopen` rather than linked.
+3. ✅ Shared-memory magic, version and size (§3.3).
 
-**P1 — make real apps work**
-4. Per-connection geometry and format (§2.1)
-5. Diagnostics in shared memory + app screen (§4.1)
-6. Tier 1 and tier 2 daemon fallbacks (§4)
-7. Colour attachments and format extensions (§2.3)
-8. `CVPixelBufferPool` (§3.5)
+**P1 — make real apps work — DONE**
+4. ✅ Per-connection geometry and format (§2.1). Every substitution now derives
+   its shape from the sample buffer being replaced. `VCamFrameVariant` caches
+   one render per (width, height, format) per source frame, LRU-bounded to four.
+5. ✅ Diagnostics in shared memory + app screen (§4.1). Second cache line of the
+   region, all atomics; hook bitmask, frames seen/replaced/driven, active tier,
+   render-vs-cache ratio, declined format, last error.
+6. ✅ Tiers 1 and 2 plus the arbiter (§4). Escalates after ~6s of frames
+   flowing with none replaced.
+7. ✅ Colour attachments (§2.3) — BT.709 primaries, transfer function and
+   matrix set on each pooled buffer *before* rendering, so CoreImage converts to
+   match rather than the description merely claiming it.
+8. ✅ `CVPixelBufferPool` per variant (§3.5), with an allocation threshold as
+   the jetsam guard — at the ceiling we skip the frame rather than be killed.
+9. ✅ `BWStillImageScalerNode` (§2.4), promoted from P2 since it was one line.
 
-**P2 — coverage**
-9. Client-side library: tiers 3 to 5 (§2.7, §4)
-10. Synthetic source and stream publication (§2.2)
-11. `BWStillImageScalerNode` (§2.4)
-12. End-to-end self-test (§4.2)
+**P2 — coverage (next)**
+10. Client-side library: tiers 3 to 5 (§2.7, §4) — the largest remaining
+    coverage gap. Preview-only sessions still see the real camera.
+11. Synthetic source and stream publication (§2.2) — front-camera clients.
+12. Format-description extensions beyond colour: field of view, intrinsic
+    matrix (§2.3).
+13. End-to-end self-test (§4.2).
 
 **P3 — features**
-13. Virtual microphone, client-side (§2.6)
-14. Movie recording (§2.5)
-15. Stale-frame watchdog (§3.8)
+14. Virtual microphone, client-side (§2.6)
+15. Movie recording (§2.5)
+16. Stale-frame watchdog (§3.8)
+
+**Still open from §3**
+- Per-app verdict is a single global byte (§3.6) — needs daemon-side client
+  identity, which needs research.
+- `driveRemoteSinks` nil input (§3.7) — now skips rather than pushing nil.
 
 **Research before building**
 - `FigCaptureSourceBackingsProvider` on iOS 26, `_sSourceList` on 27 → §2.2
