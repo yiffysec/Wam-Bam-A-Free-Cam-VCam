@@ -1,5 +1,11 @@
 # Architecture audit — 2026-11-24
 
+> **Build status:** all three schemes build clean end to end as of `fd71c30`.
+> Getting there surfaced five more defects after this audit was written — a
+> torn-read bug in the seqlock, a file that never compiled at all, a missing
+> `__block`, a drifted SDK pin, and a misplaced injection filter. They are
+> recorded in §8.
+
 A review of everything built so far against the research, against what
 comparable implementations actually ship, and against the goal of working
 across the board rather than on a happy path.
@@ -327,3 +333,44 @@ virtual camera is actually running, never on load.
 - Resolving a sink's client PID to a bundle ID → §3.6
 - Audio graph injection daemon-side, if client-side proves insufficient → §2.6
 - Confirming the `BW*` class set is unchanged on iOS 26.x on a real device
+
+---
+
+## 8. What compiling it actually found
+
+The audit above was written without ever having run a compiler, because hosted
+macOS arm64 runners were never acquired — there is an ongoing global problem
+with the Apple-silicon pool, and the fix is to pin the job to `-intel`.
+
+Two things came out of fixing that. First, `tools/syntax-check.sh`: clang can
+target `arm64-apple-ios` against the real SDK and report every syntax and
+semantic error without emitting an object file, so no Mach-O linker is needed
+and the check runs on Linux in about twenty seconds. It now gates the macOS
+packaging jobs, so a scarce runner is never spent on code that does not compile.
+Second, five defects that no amount of reading had caught:
+
+| Defect | Severity | How it presented |
+|---|---|---|
+| Seqlock reader could return a torn copy | **high** | `continue` on the odd-sequence retry jumped to `while (seq1 != seq2)` with `seq2` uninitialised. When the stack garbage matched, the loop exited and the caller got an unvalidated snapshot — `enabled` included. In the daemon that reads as the camera switching itself on or off at random. |
+| `VCamBootGuard.m` never compiled | **high** | Path macros lived in a header it did not include, so `@kVCamLibraryDir` was `@` followed by an unknown identifier. Reported as "unexpected '@' in program", which points at the wrong thing entirely. |
+| `-commit` captured a variable with no `__block` | medium | The atomic plist write read an uninitialised pointer. |
+| `VCamClient` pinned `iphoneos:18.5` | medium | Drifted out of step with the root's `:latest:`; "Your chosen SDK does not appear to exist". |
+| Host filter plist in `VCamHost/` | medium | Theos looks for `$(TWEAK_NAME).plist` in the *project root*; staging failed with "You are missing a filter property list". |
+
+Two linker problems were fixed by removing dependencies rather than satisfying
+them, which is the better outcome in both cases:
+
+- `-framework Preferences` failed because the SDK's `Preferences.framework`
+  carries only a `.tbd` with no linkable stub. A settings bundle does not need
+  to link it — it loads into Settings, where the framework is already resident,
+  and `-undefined dynamic_lookup` resolves the class reference at load time.
+- The BGRA→NV12 Metal kernel was dead code, so the runtime shader compile that
+  created the §3.1 boot-hang risk is gone entirely rather than merely deferred.
+
+**The lesson worth keeping:** every one of these was invisible to careful
+reading and obvious to a compiler. Structural fixes beat spot fixes — the path
+macros moved to the header everything includes, and `ARCHS`/`TARGET` became
+conditional in all four subprojects, so neither class of bug can recur.
+
+Still unverified: nothing here has run on a device. A clean build says the code
+is well-formed, not that it works.

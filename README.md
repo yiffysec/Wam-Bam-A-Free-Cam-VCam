@@ -329,8 +329,13 @@ Not working at all? Check these in order:
 
 ## Current state
 
-Everything described above is implemented, and not yet validated on physical
-hardware.
+Everything described above is implemented and **builds clean on all three
+jailbreak schemes** — roothide (`iphoneos-arm64e`), rootless and rootful — for
+arm64 and arm64e, with the companion app signed with its entitlements. Grab a
+`.deb` from the [latest CI run](../../actions).
+
+It has **not** been validated on physical hardware yet. Everything below is
+what to expect when it is.
 
 **[`docs/AUDIT.md`](docs/AUDIT.md) is the honest account** — a full review of
 what works, what is missing, and what to build next, in priority order. Read it
