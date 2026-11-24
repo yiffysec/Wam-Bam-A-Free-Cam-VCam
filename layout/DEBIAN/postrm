@@ -1,0 +1,21 @@
+#!/bin/sh
+set -e
+
+VCAM_DIR="/var/mobile/Library/WamBamVCam"
+
+# Clear the shared-memory file and the kill switch. The user's imported media
+# and Config.plist are deliberately left alone: a reinstall should not lose them.
+# Delete the directory by hand if you want a truly clean slate.
+rm -f "$VCAM_DIR/vcam.shm" \
+      "$VCAM_DIR/killswitch" \
+      "$VCAM_DIR/crash_counter" \
+      "$VCAM_DIR/loading.stamp" 2>/dev/null || true
+
+if [ -x /usr/bin/uicache ]; then
+    uicache --all >/dev/null 2>&1 || uicache >/dev/null 2>&1 || true
+fi
+
+killall -9 cameracaptured >/dev/null 2>&1 || true
+killall -9 mediaserverd  >/dev/null 2>&1 || true
+
+exit 0

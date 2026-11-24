@@ -1,0 +1,55 @@
+#!/bin/sh
+set -e
+
+# Where the config, the imported media and the shared-memory file live.
+# The camera daemon runs as a different user than mobile, so the directory has
+# to be traversable and the files world-readable. libSandy grants the sandbox
+# extension; these permissions grant the POSIX half.
+VCAM_DIR="/var/mobile/Library/WamBamVCam"
+
+mkdir -p "$VCAM_DIR"
+chown mobile:mobile "$VCAM_DIR" 2>/dev/null || true
+chmod 755 "$VCAM_DIR"
+
+# A fresh install starts disabled. Nothing is replaced until the user says so.
+if [ ! -f "$VCAM_DIR/Config.plist" ]; then
+    cat > "$VCAM_DIR/Config.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>enabled</key><false/>
+    <key>paused</key><false/>
+    <key>sourceType</key><integer>0</integer>
+    <key>fitMode</key><integer>0</integer>
+    <key>rotation</key><integer>0</integer>
+    <key>zoom</key><real>1.0</real>
+    <key>panX</key><real>0.0</real>
+    <key>panY</key><real>0.0</real>
+    <key>mirrorH</key><false/>
+    <key>mirrorV</key><false/>
+    <key>hudEnabled</key><true/>
+    <key>useRealAudio</key><true/>
+    <key>perAppEnabled</key><false/>
+    <key>perAppList</key><array/>
+</dict>
+</plist>
+PLIST
+    chown mobile:mobile "$VCAM_DIR/Config.plist" 2>/dev/null || true
+    chmod 644 "$VCAM_DIR/Config.plist"
+fi
+
+# Any kill switch left over from a previous version is stale on a fresh install.
+rm -f "$VCAM_DIR/killswitch" "$VCAM_DIR/crash_counter" "$VCAM_DIR/loading.stamp"
+
+# Register the app with the icon cache so it appears without a respring.
+if [ -x /usr/bin/uicache ]; then
+    uicache --all >/dev/null 2>&1 || uicache >/dev/null 2>&1 || true
+fi
+
+# Restart the capture daemon so hooks take effect immediately. launchd brings it
+# straight back; any app mid-capture simply restarts its session.
+killall -9 cameracaptured >/dev/null 2>&1 || true
+killall -9 mediaserverd  >/dev/null 2>&1 || true
+
+exit 0

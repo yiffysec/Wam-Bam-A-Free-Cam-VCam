@@ -1,0 +1,19 @@
+Package: com.yiffysec.wambamvcam
+Name: Wam Bam A Free Cam
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: A virtual camera that actually works, and is actually free.
+ Replaces the camera feed system-wide or per app with your own video or photo,
+ on iOS 15 through 26+, across rootful, rootless and roothide jailbreaks.
+ .
+ Hooks the capture graph where it actually lives: cameracaptured on iOS 18 and
+ newer, mediaserverd before that. Ships a companion app with the full control
+ set, an optional SpringBoard HUD, a Settings pane, and a boot-loop kill switch
+ so a bad frame never costs you a restore.
+Maintainer: yiffysec <https://github.com/yiffysec>
+Author: yiffysec <https://github.com/yiffysec>
+Section: Tweaks
+Depends: firmware (>= 15.0), ellekit | mobilesubstrate (>= 0.9.5000), preferenceloader, com.opa334.libsandy
+Homepage: https://github.com/yiffysec/Wam-Bam-A-Free-Cam-VCam
+Depiction: https://github.com/yiffysec/Wam-Bam-A-Free-Cam-VCam
+Tag: role::hacker

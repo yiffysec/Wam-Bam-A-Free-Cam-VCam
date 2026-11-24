@@ -1,0 +1,114 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+  release:
+    types: [created]
+
+jobs:
+  build:
+    name: ${{ matrix.scheme }}
+    runs-on: macos-14
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - scheme: roothide
+            arch: iphoneos-arm64e
+            suffix: roothide
+          - scheme: rootless
+            arch: iphoneos-arm64
+            suffix: rootless
+          - scheme: rootful
+            arch: iphoneos-arm
+            suffix: rootful
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache Theos
+        id: theos-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/theos
+          key: theos-${{ matrix.scheme }}-${{ runner.os }}-v2
+
+      - name: Install Theos
+        if: steps.theos-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.scheme }}" = "roothide" ]; then
+            # roothide needs its own Theos fork for jbroot() path rewriting.
+            git clone --recursive https://github.com/roothide/theos.git ~/theos
+          else
+            git clone --recursive https://github.com/theos/theos.git ~/theos
+          fi
+
+      - name: Install iOS SDK
+        if: steps.theos-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p ~/theos/sdks
+          cd ~/theos/sdks
+          curl -sSL -o sdk.tar.gz \
+            https://github.com/theos/sdks/archive/refs/heads/master.tar.gz
+          tar -xzf sdk.tar.gz --strip-components=1 \
+            --include='*/iPhoneOS1[5-9].*.sdk' \
+            --include='*/iPhoneOS2*.sdk' 2>/dev/null \
+            || tar -xzf sdk.tar.gz --strip-components=1
+          rm -f sdk.tar.gz
+          ls -1
+
+      - name: Install ldid
+        run: |
+          set -euo pipefail
+          brew install ldid || brew install ldid-procursus || true
+          ldid -v || true
+
+      - name: Set package architecture
+        run: |
+          set -euo pipefail
+          sed -i '' 's/^Architecture: .*/Architecture: ${{ matrix.arch }}/' \
+            layout/DEBIAN/control
+          grep '^Architecture:' layout/DEBIAN/control
+
+      - name: Build
+        env:
+          THEOS: /Users/runner/theos
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.scheme }}" = "rootful" ]; then
+            make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=
+          else
+            make package FINALPACKAGE=1 \
+                 THEOS_PACKAGE_SCHEME=${{ matrix.scheme }}
+          fi
+
+      - name: Rename artifact
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for f in packages/*.deb; do
+            base="$(basename "$f" .deb)"
+            cp "$f" "dist/${base}-${{ matrix.suffix }}.deb"
+          done
+          ls -lh dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wambamvcam-${{ matrix.suffix }}
+          path: dist/*.deb
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.deb

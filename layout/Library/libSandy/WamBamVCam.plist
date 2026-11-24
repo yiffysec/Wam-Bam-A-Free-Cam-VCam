@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Grants cameracaptured / mediaserverd read access to the tweak's own
+         directory. Without this the daemon's sandbox denies the config plist
+         and the media file, which looks exactly like "the tweak does nothing".
+
+         The grant is deliberately narrow: one directory, read and write for
+         the shared-memory file only. No broader filesystem reach is requested. -->
+    <key>Name</key>
+    <string>WamBamVCam</string>
+
+    <key>Extensions</key>
+    <array>
+        <dict>
+            <key>Class</key>
+            <string>file-read-data</string>
+            <key>Path</key>
+            <string>/var/mobile/Library/WamBamVCam</string>
+        </dict>
+        <dict>
+            <key>Class</key>
+            <string>file-read-metadata</string>
+            <key>Path</key>
+            <string>/var/mobile/Library/WamBamVCam</string>
+        </dict>
+        <dict>
+            <key>Class</key>
+            <string>file-write-data</string>
+            <key>Path</key>
+            <string>/var/mobile/Library/WamBamVCam/vcam.shm</string>
+        </dict>
+    </array>
+</dict>
+</plist>

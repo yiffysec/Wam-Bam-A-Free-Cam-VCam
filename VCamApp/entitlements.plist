@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Required for jailbroken apps installed outside App Store -->
+    <key>platform-application</key>
+    <true/>
+    <!-- Required for direct filesystem access outside sandbox -->
+    <key>com.apple.private.security.no-sandbox</key>
+    <true/>
+    <!-- Required to access other apps' data containers (per-app config) -->
+    <key>com.apple.private.security.storage.AppBundles</key>
+    <true/>
+    <key>com.apple.private.security.storage.AppDataContainers</key>
+    <true/>
+    <!-- Camera access for preview comparison -->
+    <key>com.apple.security.personal-information.camera</key>
+    <true/>
+    <!-- Photos / photo library access for media import -->
+    <key>com.apple.security.personal-information.photos-library</key>
+    <true/>
+    <!-- Microphone for audio preview -->
+    <key>com.apple.security.personal-information.microphone</key>
+    <true/>
+</dict>
+</plist>

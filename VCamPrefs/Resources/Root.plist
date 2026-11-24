@@ -1,0 +1,156 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>title</key>
+    <string>Wam Bam VCam</string>
+    <key>items</key>
+    <array>
+
+        <dict>
+            <key>cell</key>       <string>PSGroupCell</string>
+            <key>footerText</key>
+            <string>This pane covers the common toggles. Media import, per-app selection and framing live in the Wam Bam VCam app.</string>
+        </dict>
+        <dict>
+            <key>cell</key>       <string>PSButtonCell</string>
+            <key>label</key>      <string>Open Wam Bam VCam</string>
+            <key>action</key>     <string>openApp</string>
+        </dict>
+
+        <dict>
+            <key>cell</key>       <string>PSGroupCell</string>
+            <key>label</key>      <string>Virtual Camera</string>
+        </dict>
+        <dict>
+            <key>cell</key>       <string>PSSwitchCell</string>
+            <key>key</key>        <string>enabled</string>
+            <key>label</key>      <string>Enable VCam</string>
+            <key>default</key>    <false/>
+        </dict>
+        <dict>
+            <key>cell</key>       <string>PSSwitchCell</string>
+            <key>key</key>        <string>paused</string>
+            <key>label</key>      <string>Pause (real camera)</string>
+            <key>default</key>    <false/>
+        </dict>
+
+        <dict>
+            <key>cell</key>       <string>PSGroupCell</string>
+            <key>label</key>      <string>Media Source</string>
+            <key>footerText</key>
+            <string>Pick media in the app. This field is here for advanced use — point it at any readable path.</string>
+        </dict>
+        <dict>
+            <key>cell</key>       <string>PSEditTextCell</string>
+            <key>key</key>        <string>sourcePath</string>
+            <key>label</key>      <string>Media Path</string>
+            <key>placeholder</key><string>/var/mobile/Library/WamBamVCam/source.mov</string>
+        </dict>
+
+        <dict>
+            <key>cell</key>       <string>PSGroupCell</string>
+            <key>label</key>      <string>Framing</string>
+            <key>footerText</key>
+            <string>Fill crops to the camera's aspect ratio so no black bars appear. Fit letterboxes instead. Use 90° or 270° for landscape footage.</string>
+        </dict>
+        <dict>
+            <key>cell</key>       <string>PSSegmentCell</string>
+            <key>key</key>        <string>fitMode</string>
+            <key>label</key>      <string>Fit Mode</string>
+            <key>default</key>    <integer>0</integer>
+            <key>validValues</key>
+            <array><integer>0</integer><integer>1</integer><integer>2</integer></array>
+            <key>validTitles</key>
+            <array><string>Fill</string><string>Fit</string><string>Stretch</string></array>
+        </dict>
+        <dict>
+            <key>cell</key>       <string>PSSegmentCell</string>
+            <key>key</key>        <string>rotation</string>
+            <key>label</key>      <string>Rotation</string>
+            <key>default</key>    <integer>0</integer>
+            <key>validValues</key>
+            <array><integer>0</integer><integer>90</integer><integer>180</integer><integer>270</integer></array>
+            <key>validTitles</key>
+            <array><string>0°</string><string>90°</string><string>180°</string><string>270°</string></array>
+        </dict>
+        <dict>
+            <key>cell</key>       <string>PSSwitchCell</string>
+            <key>key</key>        <string>mirrorH</string>
+            <key>label</key>      <string>Mirror Horizontally</string>
+            <key>default</key>    <false/>
+        </dict>
+        <dict>
+            <key>cell</key>       <string>PSSwitchCell</string>
+            <key>key</key>        <string>mirrorV</string>
+            <key>label</key>      <string>Mirror Vertically</string>
+            <key>default</key>    <false/>
+        </dict>
+
+        <dict>
+            <key>cell</key>       <string>PSGroupCell</string>
+            <key>label</key>      <string>Audio</string>
+            <key>footerText</key>
+            <string>With the real microphone on, apps hear your surroundings while seeing your media.</string>
+        </dict>
+        <dict>
+            <key>cell</key>       <string>PSSwitchCell</string>
+            <key>key</key>        <string>useRealAudio</string>
+            <key>label</key>      <string>Use Real Microphone</string>
+            <key>default</key>    <true/>
+        </dict>
+        <dict>
+            <key>cell</key>       <string>PSEditTextCell</string>
+            <key>key</key>        <string>audioPath</string>
+            <key>label</key>      <string>Custom Audio</string>
+            <key>placeholder</key><string>/var/mobile/Library/WamBamVCam/audio.m4a</string>
+        </dict>
+
+        <dict>
+            <key>cell</key>       <string>PSGroupCell</string>
+            <key>label</key>      <string>App Targeting</string>
+            <key>footerText</key>
+            <string>Off replaces the camera everywhere. On leaves the real camera intact except in the apps you choose in the app.</string>
+        </dict>
+        <dict>
+            <key>cell</key>       <string>PSSwitchCell</string>
+            <key>key</key>        <string>perAppEnabled</string>
+            <key>label</key>      <string>Per-App Mode</string>
+            <key>default</key>    <false/>
+        </dict>
+
+        <dict>
+            <key>cell</key>       <string>PSGroupCell</string>
+            <key>label</key>      <string>SpringBoard HUD</string>
+            <key>footerText</key>
+            <string>The HUD is optional. If it is missing or unresponsive the app takes over every control — nothing is lost.</string>
+        </dict>
+        <dict>
+            <key>cell</key>       <string>PSSwitchCell</string>
+            <key>key</key>        <string>hudEnabled</string>
+            <key>label</key>      <string>Show HUD</string>
+            <key>default</key>    <true/>
+        </dict>
+        <dict>
+            <key>cell</key>       <string>PSButtonCell</string>
+            <key>label</key>      <string>Check HUD Status</string>
+            <key>action</key>     <string>checkHUD</string>
+        </dict>
+
+        <dict>
+            <key>cell</key>       <string>PSGroupCell</string>
+            <key>label</key>      <string>Safety</string>
+            <key>footerText</key>
+            <string>If the camera daemon crashes three times in a row the tweak disables itself rather than risk a boot loop. Clear the kill switch once the cause is addressed.</string>
+        </dict>
+        <dict>
+            <key>cell</key>       <string>PSButtonCell</string>
+            <key>label</key>      <string>Clear Kill Switch</string>
+            <key>action</key>     <string>clearKillSwitch</string>
+            <key>isDestructive</key> <true/>
+        </dict>
+
+    </array>
+</dict>
+</plist>
