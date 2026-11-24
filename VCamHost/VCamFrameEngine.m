@@ -319,7 +319,20 @@ static const double kVCamStallThresholdSec = 2.0 / kVCamTargetFPS;
     }
 
     CVPixelBufferRef out = [variant newPooledBuffer];
-    if (!out) { CVPixelBufferRelease(source); return NULL; }
+    if (!out) {
+        // Pool exhausted: every buffer we vended for this shape is still held
+        // downstream. Serve the LAST frame we rendered rather than NULL. NULL
+        // makes the hook fall back to the real camera buffer -- a visible flash
+        // of the true feed, which for a virtual camera is the one outcome worse
+        // than a repeated frame. (Stills never reach here: their generation is
+        // fixed, so the cache hit above always serves.) Re-serving the cached
+        // buffer does not allocate, so it cannot deepen the exhaustion.
+        CVPixelBufferRef last = [variant lastRenderedBuffer];
+        CVPixelBufferRelease(source);
+        if (last) vcam_diag_note_cache_hit();
+        else      vcam_diag_set_last_error(VCamDiagErrorPoolExhausted);
+        return last;   // NULL only if this shape has never been rendered
+    }
 
     BOOL ok = [self renderSource:source
                             into:out

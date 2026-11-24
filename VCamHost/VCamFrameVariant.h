@@ -24,9 +24,16 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-/// Allocation ceiling per variant. The camera daemon has a tight jetsam budget,
-/// so the pool refuses to grow past this rather than being killed.
-static const int kVCamVariantPoolCeiling = 3;
+/// Allocation ceiling per variant. Must cover every buffer that can be in flight
+/// at once for one shape: the current cached frame, the frame just handed to the
+/// sink, and the one or two prior frames a third-party consumer may still hold
+/// in its own XPC queue. Three was too few -- the pool ran dry mid-stream and the
+/// hook fell back to the real camera, which is the "video flashes the real feed"
+/// symptom. Six gives comfortable headroom at ~3 MB per 1080p NV12 buffer, well
+/// inside the daemon's budget for the one or two shapes typically active. The
+/// exhaustion fallback (serve the last rendered frame) still guarantees we never
+/// leak the real camera even if this is somehow exceeded.
+static const int kVCamVariantPoolCeiling = 6;
 
 @interface VCamFrameVariant : NSObject
 
@@ -54,6 +61,12 @@ static const int kVCamVariantPoolCeiling = 3;
 /// otherwise NULL. Caller must CVPixelBufferRelease a non-NULL result.
 - (nullable CVPixelBufferRef)cachedBufferForGeneration:(uint64_t)generation
                                                         CF_RETURNS_RETAINED;
+
+/// Returns the most recently rendered buffer for this shape, retained,
+/// regardless of which generation it came from, or NULL if nothing has been
+/// rendered yet. Used as the exhaustion fallback: a stale-but-ours frame always
+/// beats letting the real camera through. Caller must CVPixelBufferRelease.
+- (nullable CVPixelBufferRef)lastRenderedBuffer CF_RETURNS_RETAINED;
 
 /// Takes a buffer from the pool, ready to be rendered into. Colour attachments
 /// are applied before return, so CoreImage honours them during the render.

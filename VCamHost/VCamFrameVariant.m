@@ -167,6 +167,12 @@ static void vcam_attach_color_metadata(CVPixelBufferRef buf, OSType format) {
     return _cached;
 }
 
+- (CVPixelBufferRef)lastRenderedBuffer {
+    if (!_cached) return NULL;
+    CVPixelBufferRetain(_cached);
+    return _cached;
+}
+
 - (CVPixelBufferRef)newPooledBuffer {
     if (!_pool) return NULL;
 
