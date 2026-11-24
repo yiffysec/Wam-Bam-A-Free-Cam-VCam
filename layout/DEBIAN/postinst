@@ -40,7 +40,14 @@ PLIST
 fi
 
 # Any kill switch left over from a previous version is stale on a fresh install.
-rm -f "$VCAM_DIR/killswitch" "$VCAM_DIR/crash_counter" "$VCAM_DIR/loading.stamp"
+# vcam.shm goes too: it is a file, so it survives upgrades, and if the struct
+# layout changed between versions every field in it would be misread. The code
+# validates a magic/version header and reinitialises on mismatch, but removing
+# it here means that path is a safety net rather than the normal case.
+rm -f "$VCAM_DIR/killswitch" \
+      "$VCAM_DIR/crash_counter" \
+      "$VCAM_DIR/loading.stamp" \
+      "$VCAM_DIR/vcam.shm"
 
 # Register the app with the icon cache so it appears without a respring.
 if [ -x /usr/bin/uicache ]; then

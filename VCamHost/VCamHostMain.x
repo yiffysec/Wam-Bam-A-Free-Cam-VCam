@@ -24,6 +24,9 @@
 
 #import <Foundation/Foundation.h>
 #import <substrate.h>
+#include <unistd.h>
+#include <errno.h>
+#include <dlfcn.h>
 
 #import "VCamTypes.h"
 #import "VCamSharedState.h"
@@ -35,6 +38,76 @@
 // Implemented in VCamHooks.x
 void vcam_install_hooks_ios18(void);
 void vcam_install_hooks_ios17(void);
+
+// -- libSandy -------------------------------------------------------------
+// cameracaptured and mediaserverd run in their own sandboxes, which deny reads
+// of /var/mobile/Library by default. libSandy consumes the profile we ship at
+// /Library/libSandy/WamBamVCam.plist and hands the daemon a sandbox extension
+// for exactly that directory.
+//
+// Resolved with dlopen/dlsym rather than linked. Linking it -- even weakly --
+// makes libsandy.dylib a load-time dependency of this dylib, and a load failure
+// inside the camera daemon means a broken camera. dlopen cannot fail that way:
+// the worst case is a log line and an unextended sandbox.
+//
+// Several paths are tried because the library lives in a different place under
+// each jailbreak scheme. The usual presentation of a missing extension is "the
+// tweak does nothing", with config and media reads failing silently, so this is
+// worth being loud about.
+#define kVCamSandyProfile "WamBamVCam"
+#define kVCamSandySuccess 0
+
+typedef int (*VCamSandyFn)(const char *);
+
+static void vcam_apply_sandbox_extensions(void) {
+    static const char *candidates[] = {
+        "libsandy.dylib",                            // already loaded, or on the path
+        "/usr/lib/libsandy.dylib",                   // rootful, and roothide via jbroot
+        "/var/jb/usr/lib/libsandy.dylib",            // rootless
+        "/usr/lib/libSandy.dylib",
+        "/var/jb/usr/lib/libSandy.dylib",
+    };
+
+    void *handle = NULL;
+    for (size_t i = 0; i < VCAM_ARRAY_SIZE(candidates); i++) {
+        handle = dlopen(candidates[i], RTLD_LAZY | RTLD_NOLOAD);
+        if (!handle) handle = dlopen(candidates[i], RTLD_LAZY);
+        if (handle) break;
+    }
+
+    if (!handle) {
+        VCamLogE("sandbox: libSandy not found. If the daemon cannot read "
+                 "%{public}s, install com.opa334.libsandy.", kVCamConfigPath);
+        return;
+    }
+
+    VCamSandyFn apply =
+        (VCamSandyFn)dlsym(handle, "libSandy_applySandboxExtensions");
+    if (!apply) {
+        VCamLogE("sandbox: libSandy loaded but the entry point is missing");
+        return;
+    }
+
+    int rc = apply(kVCamSandyProfile);
+    if (rc == kVCamSandySuccess) {
+        VCamLogI("sandbox: libSandy profile '%{public}s' applied",
+                 kVCamSandyProfile);
+    } else {
+        VCamLogE("sandbox: libSandy profile '%{public}s' failed rc=%d -- config "
+                 "and media reads may be denied", kVCamSandyProfile, rc);
+    }
+}
+
+/// Confirms the daemon can actually read the config. Cheap, and turns an
+/// invisible sandbox denial into one explicit log line.
+static void vcam_verify_config_readable(void) {
+    if (access(kVCamConfigPath, R_OK) == 0) {
+        VCamLogI("sandbox: %{public}s is readable", kVCamConfigPath);
+        return;
+    }
+    VCamLogE("sandbox: cannot read %{public}s (errno=%d). The virtual camera "
+             "will stay idle until this is resolved.", kVCamConfigPath, errno);
+}
 
 // -- Version state --------------------------------------------------------
 static int g_iosMajor = 0;
@@ -98,8 +171,12 @@ static void VCamHostInit(void) {
             return;
         }
 
-        // 4 -- Shared memory. Without it there is no way to read the user's
-        //      intent on the hot path, so stop rather than hook blindly.
+        // 4a -- Sandbox extensions, before any read of our own directory.
+        vcam_apply_sandbox_extensions();
+        vcam_verify_config_readable();
+
+        // 4b -- Shared memory. Without it there is no way to read the user's
+        //       intent on the hot path, so stop rather than hook blindly.
         if (vcam_shm_open() != 0) {
             VCamLogE("init: shared memory unavailable -- not hooking");
             vcam_bootguard_reset();

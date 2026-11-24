@@ -36,6 +36,9 @@ WBFCVCamHost_CFLAGS  = -fobjc-arc \
                        -I$(THEOS_PROJECT_DIR)/VCamHost \
                        -Wno-deprecated-declarations
 
+# libSandy is deliberately NOT linked. It is resolved with dlopen/dlsym at
+# runtime instead, so a missing or broken libSandy cannot stop this dylib from
+# loading into the camera daemon -- a load failure there is a bricked camera.
 WBFCVCamHost_LDFLAGS = -undefined dynamic_lookup
 
 include $(THEOS_MAKE_PATH)/tweak.mk

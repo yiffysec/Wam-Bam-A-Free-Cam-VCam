@@ -99,6 +99,11 @@ static const double kVCamStallThresholdSec = 2.0 / kVCamTargetFPS;
 - (void)startOnQueue {
     if (_running) return;
 
+    // Block here, not in the constructor: this is our own background queue, so
+    // waiting for Metal costs nothing but a few early frames, whereas waiting
+    // in the dylib constructor would stall cameracaptured's startup.
+    [VCamPixelConverter.sharedConverter ensureReady];
+
     VCamSharedState st;
     vcam_shm_read(&st);
     [self adoptState:&st];

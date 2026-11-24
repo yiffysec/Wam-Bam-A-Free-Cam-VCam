@@ -68,7 +68,35 @@ static NSString *const kBGRA2NV12Shader = @
     return s;
 }
 
+// -- Lazy setup ------------------------------------------------------------
+// NEVER call this from a dylib constructor. Two reasons, both load-bearing:
+//
+//   1. newLibraryWithSource: compiles Metal from source text at runtime, which
+//      costs on the order of hundreds of milliseconds. Spending that inside
+//      cameracaptured's startup delays the torch XPC service that SpringBoard
+//      waits on synchronously during boot -- the same class of hang the OSType
+//      trap produces, reached by a different route.
+//   2. cameracaptured runs its own GPU prewarm at startup
+//      (FigCapturePreloadShaders -> PrewarmThreadSafeSBPs -> NRFProcessorV3
+//      prewarm), which is known to crash-loop in some iOS 26 configurations.
+//      Creating our own Metal device concurrently with Apple's prewarm is a
+//      risk with no upside.
+//
+// So: -setup only arms the converter. The expensive work happens on first use,
+// on a background queue, once. Callers must tolerate -ciContext returning nil
+// until it completes; the frame engine does.
 - (void)setup {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        [self ensureReady];
+    });
+}
+
+- (void)ensureReady {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ [self reallySetup]; });
+}
+
+- (void)reallySetup {
     if (_ready) return;
 
     _device = MTLCreateSystemDefaultDevice();
@@ -79,41 +107,68 @@ static NSString *const kBGRA2NV12Shader = @
 
     _cmdQueue = [_device newCommandQueue];
 
-    // Compile the BGRA→NV12 kernel
+    // CIContext first: it is what the frame engine actually depends on, and it
+    // needs no custom shader. Giving it a defined working colour space matters
+    // -- rendering into a YCbCr buffer with colour management switched off is
+    // ambiguous and shifts colour. sRGB in, and the buffer's own attachments
+    // declare BT.709 on the way out.
+    CGColorSpaceRef srgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    NSDictionary *ctxOpts = @{
+        kCIContextWorkingColorSpace:     (__bridge id)srgb,
+        kCIContextHighQualityDownsample: @NO,
+        kCIContextCacheIntermediates:    @NO,
+    };
+    _ciContext = [CIContext contextWithMTLDevice:_device options:ctxOpts];
+    if (srgb) CGColorSpaceRelease(srgb);
+
+    if (!_ciContext) {
+        VCamLogE("VCamPixelConverter: CIContext creation failed");
+        return;
+    }
+
+    // Metal texture cache for CVPixelBuffer -> MTLTexture.
+    CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, _device, nil, &_textureCache);
+
+    // Ready to serve. Everything below is an optimisation.
+    _ready = YES;
+    VCamLogI("VCamPixelConverter: ready on '%{public}@'", _device.name);
+
+    // The BGRA->NV12 compute kernel is strictly optional: convertTo420v: falls
+    // back to the CIContext path when the pipeline is absent. A compile failure
+    // here must never take the converter down with it.
     NSError *err = nil;
     id<MTLLibrary> lib = [_device newLibraryWithSource:kBGRA2NV12Shader
                                                options:nil
                                                  error:&err];
-    if (!lib || err) {
-        VCamLogE("VCamPixelConverter: shader compile error: %@", err);
+    if (!lib) {
+        VCamLogE("VCamPixelConverter: shader compile failed (%{public}@) -- "
+                 "continuing on the CIContext path", err);
         return;
     }
 
     id<MTLFunction> fn = [lib newFunctionWithName:@"bgra_to_nv12"];
-    _pipelineBGRA2NV12 = [_device newComputePipelineStateWithFunction:fn error:&err];
-    if (!_pipelineBGRA2NV12 || err) {
-        VCamLogE("VCamPixelConverter: pipeline error: %@", err);
+    if (!fn) {
+        VCamLogE("VCamPixelConverter: kernel function missing -- continuing on "
+                 "the CIContext path");
         return;
     }
 
-    // CIContext — Metal-backed, no color management (we handle color space ourselves)
-    NSDictionary *ctxOpts = @{
-        kCIContextUseSoftwareRenderer:    @NO,
-        kCIContextWorkingColorSpace:      (id)kCFNull,
-        kCIContextOutputColorSpace:       (id)kCFNull,
-        kCIContextHighQualityDownsample:  @NO,
-    };
-    _ciContext = [CIContext contextWithMTLDevice:_device options:ctxOpts];
+    _pipelineBGRA2NV12 = [_device newComputePipelineStateWithFunction:fn error:&err];
+    if (!_pipelineBGRA2NV12) {
+        VCamLogE("VCamPixelConverter: pipeline creation failed (%{public}@) -- "
+                 "continuing on the CIContext path", err);
+        return;
+    }
 
-    // Metal texture cache for CVPixelBuffer → MTLTexture conversion
-    CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, _device, nil, &_textureCache);
-
-    _ready = YES;
-    VCamLogI("VCamPixelConverter: Metal setup complete on '%@'", _device.name);
+    VCamLogI("VCamPixelConverter: BGRA->NV12 compute kernel armed");
 }
 
 - (CIContext *)ciContext {
-    return _ciContext;
+    return _ciContext;   // nil until the background setup completes
+}
+
+- (BOOL)isReady {
+    return _ready;
 }
 
 // ── convertToBGRA: ────────────────────────────────────────────────────────

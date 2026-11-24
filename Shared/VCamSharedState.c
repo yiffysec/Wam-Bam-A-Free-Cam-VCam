@@ -23,6 +23,8 @@
 static VCamSharedState *g_shm   = NULL;
 static size_t           g_shmsz = 0;
 
+static void vcam_shm_reinit_locked(void);
+
 // -- vcam_shm_open --------------------------------------------------------
 int vcam_shm_open(void) {
     if (g_shm) return 0;
@@ -56,16 +58,49 @@ int vcam_shm_open(void) {
 
     g_shm = (VCamSharedState *)map;
 
-    // First-ever map of a fresh file: zoom of 0.0 would divide-by-zero in the
-    // frame engine, so seed sane defaults exactly once.
-    if (g_shm->zoom == 0.0f) {
-        g_shm->zoom       = kVCamDefaultZoom;
-        g_shm->hudEnabled = 1;
-        g_shm->useRealAudio = 1;
+    // Validate the header. A fresh file reads as all zeroes, and a file written
+    // by a different build of this struct reads as the wrong layout -- in which
+    // case every field, `enabled` included, is garbage. Reinitialise rather than
+    // trust it.
+    if (g_shm->magic      != kVCamShmMagic   ||
+        g_shm->version    != kVCamShmVersion ||
+        g_shm->structSize != (uint16_t)sizeof(VCamSharedState)) {
+
+        if (g_shm->magic != 0 || g_shm->version != 0) {
+            VCamLogI("shm_open: header mismatch "
+                     "(magic=0x%08x ver=%u size=%u; expected 0x%08x/%u/%zu) -- "
+                     "reinitialising",
+                     g_shm->magic, g_shm->version, g_shm->structSize,
+                     kVCamShmMagic, kVCamShmVersion, sizeof(VCamSharedState));
+        }
+        vcam_shm_reinit_locked();
     }
 
-    VCamLogI("shm_open: mapped %zu bytes at %p", g_shmsz, (void *)g_shm);
+    VCamLogI("shm_open: mapped %zu bytes at %p (v%u)",
+             g_shmsz, (void *)g_shm, g_shm->version);
     return 0;
+}
+
+// -- vcam_shm_reinit_locked -----------------------------------------------
+// Zeroes the region, stamps the header and seeds defaults. A zoom of 0 would
+// divide by zero in the frame engine, and an all-zero state would also leave
+// the HUD disabled and the microphone replaced, neither of which is a sane
+// default for a fresh install.
+static void vcam_shm_reinit_locked(void) {
+    if (!g_shm) return;
+
+    memset(g_shm, 0, sizeof(VCamSharedState));
+
+    g_shm->magic      = kVCamShmMagic;
+    g_shm->version    = kVCamShmVersion;
+    g_shm->structSize = (uint16_t)sizeof(VCamSharedState);
+
+    g_shm->zoom         = kVCamDefaultZoom;
+    g_shm->hudEnabled   = 1;
+    g_shm->useRealAudio = 1;
+
+    // Start even, so the first reader sees a stable value.
+    atomic_store_explicit(&g_shm->seq, 2u, memory_order_release);
 }
 
 // -- vcam_shm_close -------------------------------------------------------
@@ -86,7 +121,11 @@ VCamSharedState *vcam_shm_ptr(void) {
 void vcam_shm_read(VCamSharedState *out) {
     if (!out) return;
 
-    if (!g_shm) {
+    // Not mapped, or mapped over a region another process is mid-reinitialise
+    // on: return safe defaults rather than a garbage `enabled`.
+    if (!g_shm ||
+        g_shm->magic   != kVCamShmMagic ||
+        g_shm->version != kVCamShmVersion) {
         memset(out, 0, sizeof(*out));
         out->zoom = kVCamDefaultZoom;
         return;

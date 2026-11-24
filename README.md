@@ -292,21 +292,33 @@ Not working at all? Check these in order:
 
 ## Current state
 
-Everything described above is implemented. What has **not** happened yet is
-validation on physical hardware across the version and jailbreak matrix — that
-is the next step, and findings will land here as they come in.
+Everything described above is implemented, and not yet validated on physical
+hardware.
 
-The things most likely to need adjustment, in rough order of likelihood:
+**[`docs/AUDIT.md`](docs/AUDIT.md) is the honest account** — a full review of
+what works, what is missing, and what to build next, in priority order. Read it
+before relying on this or sending a patch. The short version:
 
-- Sink selector signatures on iOS 26.x specifically. The verification layer will
-  log and skip rather than crash, so a mismatch shows up as "no replacement in
-  this path" in the log, not a boot loop.
-- `FigCaptureSourceBackingsProvider` source publication on iOS 27, where
-  `_sSourceList` is gone. Not needed for frame replacement, but relevant if
-  front-camera clients report no device.
-- Virtual-microphone substitution, which currently routes through the config but
-  does not yet hook `BWAudioConverterNode` in the daemon. Real-microphone
-  pass-through — the default — works.
+Confirmed gaps that will make real apps fail:
+
+- **Per-connection geometry and pixel format.** We derive one output size
+  globally instead of per sink invocation, so a client that asked for 640×480 or
+  for BGRA on a video path gets the wrong shape.
+- **No synthetic source or stream publication.** Some clients never build a
+  capture graph without one; front-camera sessions in particular can end up with
+  no device at all.
+- **No client-side component.** Apps that use only `AVCaptureVideoPreviewLayer`
+  with no data output can still show the real camera, and there is a window at
+  session start before the graph exists.
+
+Known missing features: virtual microphone (config and UI exist, no hook yet —
+real-mic pass-through works), movie recording in Camera.app, and the
+`BWStillImageScalerNode` photo-scaling path.
+
+Missing infrastructure: there is **no redundancy**. Every capability has exactly
+one implementation, and a failed hook is logged and skipped rather than falling
+back. The audit proposes a six-tier scheme with a health arbiter; none of it is
+built yet.
 
 Logs go to the unified log under subsystem `com.yiffysec.wambamvcam`:
 

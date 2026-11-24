@@ -18,6 +18,7 @@
 
 #pragma once
 #include <stdint.h>
+#include <stddef.h>
 #include <stdatomic.h>
 #include <dispatch/dispatch.h>
 
@@ -58,33 +59,54 @@ typedef enum : uint8_t {
     VCamFitStretch  = 2,   // stretch to fill (ignores aspect ratio)
 } VCamFitMode;
 
+// -- Shared-memory header identity ----------------------------------------
+// vcam.shm is a file, so it survives process restarts AND package upgrades. If
+// the layout below ever changes without this magic/version changing with it, a
+// stale file from the previous version is reinterpreted field by field --
+// including `enabled`, which is how you get a virtual camera that switches
+// itself on after an update. vcam_shm_open() validates these and reinitialises
+// the region from scratch on any mismatch.
+//
+// BUMP kVCamShmVersion ON EVERY CHANGE TO VCamSharedState.
+#define kVCamShmMagic   ((uint32_t)0x57424643u)   // 'WBFC'
+#define kVCamShmVersion ((uint16_t)2u)
+
 // -- Shared hot-path state (one cache line, seqlock-protected) ------------
 // Writer bumps seq to odd before writing and to even after. Readers loop
 // until they observe a stable, even sequence number.
+//
+// The header triple (magic, version, size) sits outside the seqlock-protected
+// body on purpose: it is written once at initialisation and never again, so a
+// reader can validate it without taking the seqlock.
 typedef struct __attribute__((aligned(64))) {
+    uint32_t          magic;            // -   : kVCamShmMagic
+    uint16_t          version;          // -   : kVCamShmVersion
+    uint16_t          structSize;       // -   : sizeof(VCamSharedState)
     _Atomic uint32_t  seq;              // 0  : seqlock counter (even = stable)
-    uint8_t           enabled;          // 4  : 1 = vcam active
-    uint8_t           paused;           // 5  : 1 = show real camera (pass-through)
-    VCamSourceType    sourceType;       // 6
-    VCamFitMode       fitMode;          // 7
-    VCamRotation      rotation;         // 8  : degrees
-    float             zoom;             // 12 : 1.0 = no zoom
-    float             panX;             // 16 : -1.0 ... 1.0
-    float             panY;             // 20
-    uint8_t           mirrorH;          // 24 : horizontal mirror
-    uint8_t           mirrorV;          // 25
-    uint8_t           hudEnabled;       // 26 : user wants the SpringBoard HUD
-    uint8_t           useRealAudio;     // 27 : 1 = pass-through mic
-    uint8_t           perAppEnabled;    // 28 : 1 = allow-list mode
-    uint8_t           _pad0[3];         // 29 : align the double
-    double            hudHeartbeat;     // 32 : CFAbsoluteTime of last HUD pong
-    uint8_t           hudAlive;         // 40 : 1 = SpringBoard tweak answered
-    uint8_t           clientAllowed;    // 41 : per-app verdict from VCamClient
-    uint8_t           _pad1[22];        // 42 : pad to 64
+    uint8_t           enabled;          // 12 : 1 = vcam active
+    uint8_t           paused;           // 13 : 1 = show real camera (pass-through)
+    VCamSourceType    sourceType;       // 14
+    VCamFitMode       fitMode;          // 15
+    VCamRotation      rotation;         // 16 : degrees
+    float             zoom;             // 20 : 1.0 = no zoom
+    float             panX;             // 24 : -1.0 ... 1.0
+    float             panY;             // 28
+    uint8_t           mirrorH;          // 32 : horizontal mirror
+    uint8_t           mirrorV;          // 33
+    uint8_t           hudEnabled;       // 34 : user wants the SpringBoard HUD
+    uint8_t           useRealAudio;     // 35 : 1 = pass-through mic
+    uint8_t           perAppEnabled;    // 36 : 1 = allow-list mode
+    uint8_t           _pad0[3];         // 37 : align the double
+    double            hudHeartbeat;     // 40 : CFAbsoluteTime of last HUD pong
+    uint8_t           hudAlive;         // 48 : 1 = SpringBoard tweak answered
+    uint8_t           clientAllowed;    // 49 : per-app verdict from VCamClient
+    uint8_t           _pad1[14];        // 50 : pad to 64
 } VCamSharedState;
 
 _Static_assert(sizeof(VCamSharedState) == 64,
                "VCamSharedState must be exactly one cache line");
+_Static_assert(offsetof(VCamSharedState, enabled) == 12,
+               "the seqlock body must start immediately after seq");
 
 // -- C API ----------------------------------------------------------------
 #ifdef __cplusplus
