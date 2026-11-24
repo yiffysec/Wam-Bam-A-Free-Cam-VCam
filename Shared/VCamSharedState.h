@@ -58,7 +58,7 @@ typedef enum : uint8_t {
 //
 // BUMP kVCamShmVersion ON EVERY CHANGE TO VCamSharedState OR VCamDiagnostics.
 #define kVCamShmMagic   ((uint32_t)0x57424643u)   // 'WBFC'
-#define kVCamShmVersion ((uint16_t)3u)
+#define kVCamShmVersion ((uint16_t)4u)
 
 // -- Shared hot-path state (one cache line, seqlock-protected) ------------
 // Writer bumps seq to odd before writing and to even after. Readers loop
@@ -137,10 +137,17 @@ typedef struct __attribute__((aligned(64))) {
     _Atomic uint32_t iosVersion;       // 52 : major << 16 | minor
     _Atomic uint32_t lastError;        // 56 : VCamDiagError
     _Atomic uint32_t daemonPid;        // 60 : 0 until the daemon reports in
+    // -- second cache line --
+    _Atomic uint64_t framesDeclined;   // 64 : frames we deliberately passed
+                                       //      through (unsupported source format).
+                                       //      A DELIBERATE non-replacement, so the
+                                       //      arbiter must not read it as failure
+                                       //      and escalate.
+    _Atomic uint8_t  _pad[56];         // 72 : reserve the rest of the line
 } VCamDiagnostics;
 
-_Static_assert(sizeof(VCamDiagnostics) == 64,
-               "VCamDiagnostics must be exactly one cache line");
+_Static_assert(sizeof(VCamDiagnostics) == 128,
+               "VCamDiagnostics must be exactly two cache lines");
 
 /// Error codes published in `lastError`. Deliberately coarse -- enough to point
 /// at a subsystem, with the unified log carrying the detail.
@@ -164,7 +171,8 @@ typedef struct {
     VCamDiagnostics diag;
 } VCamSharedRegion;
 
-_Static_assert(sizeof(VCamSharedRegion) == 128, "region must be two cache lines");
+// One cache line of state + two of diagnostics.
+_Static_assert(sizeof(VCamSharedRegion) == 192, "region must be three cache lines");
 
 // -- C API ----------------------------------------------------------------
 #ifdef __cplusplus

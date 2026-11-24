@@ -508,9 +508,9 @@ static int vcam_install_discovered_hooks(void) {
 static dispatch_source_t g_arbiterTimer = nil;
 
 static void vcam_arbiter_tick(void) {
-    static uint64_t lastSeen     = 0;
-    static uint64_t lastReplaced = 0;
-    static int      quietTicks   = 0;
+    static uint64_t lastSeen    = 0;
+    static uint64_t lastHandled = 0;
+    static int      quietTicks  = 0;
 
     VCamSharedState st;
     vcam_shm_read(&st);
@@ -521,63 +521,66 @@ static void vcam_arbiter_tick(void) {
     uint64_t seen     = atomic_load_explicit(&d.framesSeen,     memory_order_relaxed);
     uint64_t replaced = atomic_load_explicit(&d.framesReplaced, memory_order_relaxed);
     uint64_t driven   = atomic_load_explicit(&d.framesDriven,   memory_order_relaxed);
+    uint64_t declined = atomic_load_explicit(&d.framesDeclined, memory_order_relaxed);
 
-    uint64_t seenDelta     = seen     - lastSeen;
-    uint64_t replacedDelta = (replaced + driven) - lastReplaced;
+    // "Handled" is substituted OR deliberately passed through. A decline is a
+    // correct decision (the app asked for a format we must not fake), not a
+    // failure -- counting it as handled is what stops one unusual app from
+    // escalating the whole daemon, and from there into the risky discovered
+    // hooks, which is a route to crashing other apps.
+    uint64_t handled = replaced + driven + declined;
 
-    lastSeen     = seen;
-    lastReplaced = replaced + driven;
+    uint64_t seenDelta    = seen    - lastSeen;
+    uint64_t handledDelta = handled - lastHandled;
 
-    // Only judge when we are supposed to be substituting and the camera is
-    // actually running. Everything else is not evidence of anything.
+    lastSeen    = seen;
+    lastHandled = handled;
+
+    // Only judge when we are meant to be substituting and the camera is running.
     if (!st.enabled || st.paused || seenDelta == 0) {
         quietTicks = 0;
         return;
     }
 
-    if (replacedDelta > 0) {
+    if (handledDelta > 0) {
         quietTicks = 0;
         return;
     }
 
-    // Frames are flowing, none are ours.
+    // Frames are flowing and we are neither substituting nor deliberately
+    // declining them -- a genuine failure to intercept.
     if (++quietTicks < 3) return;   // ~6s of evidence before acting
     quietTicks = 0;
 
+    // Escalation is deliberately limited to the emit-replacement route, which is
+    // the same BWNodeOutput we already hook used a different way -- safe, and it
+    // also reaches the recording branch. We do NOT auto-install the discovered
+    // hooks: hooking arbitrary *SinkNode/*Encoder classes whose buffer contracts
+    // we do not know is a real way to crash a host app, and a silent
+    // pass-through is strictly better than that. Discovery remains available for
+    // a deliberate, opt-in future use, not as an automatic fallback.
     switch ((VCamTier)atomic_load_explicit(&g_activeTier, memory_order_relaxed)) {
         case VCamTierSinkHooks:
             if (orig_emitSampleBuffer) {
-                VCamLogE("arbiter: %llu frames seen, none replaced -- escalating "
-                         "to emit replacement", (unsigned long long)seenDelta);
+                VCamLogE("arbiter: %llu frames seen, none handled -- escalating to "
+                         "emit replacement", (unsigned long long)seenDelta);
                 vcam_set_tier(VCamTierEmitReplacement);
             } else {
-                VCamLogE("arbiter: no emit hook to fall back to -- trying discovery");
-                if (vcam_install_discovered_hooks() > 0) {
-                    vcam_set_tier(VCamTierDiscoveredHooks);
-                } else {
-                    vcam_set_tier(VCamTierClientSide);
-                }
-            }
-            break;
-
-        case VCamTierEmitReplacement:
-            VCamLogE("arbiter: emit replacement is not landing either -- trying "
-                     "class discovery");
-            if (vcam_install_discovered_hooks() > 0) {
-                vcam_set_tier(VCamTierDiscoveredHooks);
-            } else {
+                VCamLogE("arbiter: no emit hook to fall back to -- handing off to "
+                         "the client side");
                 vcam_set_tier(VCamTierClientSide);
             }
             break;
 
-        case VCamTierDiscoveredHooks:
-            VCamLogE("arbiter: no in-daemon route is working -- handing off to "
-                     "the client side");
+        case VCamTierEmitReplacement:
+            VCamLogE("arbiter: emit replacement is not landing either -- handing "
+                     "off to the client side");
             vcam_set_tier(VCamTierClientSide);
             break;
 
+        case VCamTierDiscoveredHooks:
         case VCamTierClientSide:
-            break;   // nothing further to try from here
+            break;   // nothing further to try automatically
     }
 
     vcam_diag_set_hooks(g_hooksAttempted, g_hooksInstalled);

@@ -251,9 +251,12 @@ static const double kVCamStallThresholdSec = 2.0 / kVCamTargetFPS;
     // exact shape this connection is receiving right now. The format
     // description is next best. The sensor default is a last resort and is
     // usually wrong for anything but the viewfinder.
+    BOOL hadImageBuffer = NO;
+
     if (sb) {
         CVPixelBufferRef original = CMSampleBufferGetImageBuffer(sb);
         if (original) {
+            hadImageBuffer = YES;
             width  = CVPixelBufferGetWidth(original);
             height = CVPixelBufferGetHeight(original);
             format = CVPixelBufferGetPixelFormatType(original);
@@ -268,16 +271,32 @@ static const double kVCamStallThresholdSec = 2.0 / kVCamTargetFPS;
         }
     }
 
+    // When the original carries a real pixel buffer, its format is ground truth:
+    // it is exactly what the connection, the encoder and the consumer expect. If
+    // we cannot produce THAT format, we must pass the real frame through rather
+    // than hand back a different layout -- a 10-bit HDR ('x420'), depth, or other
+    // biplanar variant reinterpreted as our 8-bit 420v is misread downstream and
+    // crashes the host app. This is the "some apps crash on camera open" bug:
+    // those apps simply request a format we do not synthesise. Silently passing
+    // through is correct; forcing a format is not.
+    if (hadImageBuffer) {
+        if (![VCamFrameVariant supportsPixelFormat:format]) {
+            vcam_diag_note_declined_format(format);
+            return NULL;
+        }
+    } else {
+        // No pixel buffer, only a format description (e.g. a compressed still).
+        // There is nothing to mismatch, so a supported subtype is used as-is and
+        // anything else -- including a compressed subtype -- falls back to what
+        // this sink class delivers.
+        if (format == 0 || ![VCamFrameVariant supportsPixelFormat:format]) {
+            format = fallbackFormat;
+        }
+    }
+
     if (width == 0 || height == 0) {
         width  = (size_t)_sensorSize.width;
         height = (size_t)_sensorSize.height;
-    }
-    if (format == 0 || ![VCamFrameVariant supportsPixelFormat:format]) {
-        // An unsupported subtype here usually means a compressed payload (a
-        // JPEG or HEIC still). Fall back to what this sink class wants; if that
-        // is also unsupported, frameForWidth: declines and the real frame goes
-        // through untouched.
-        format = fallbackFormat;
     }
 
     return [self frameForWidth:width height:height pixelFormat:format];

@@ -32,7 +32,10 @@ void vcam_diag_note_render(void)        { VCAM_BUMP(renders, 1);        }
 void vcam_diag_note_cache_hit(void)     { VCAM_BUMP(cacheHits, 1);      }
 
 void vcam_diag_note_declined_format(uint32_t fourCC) {
-    VCAM_SET(declinedFormat, fourCC);
+    VCamDiagnostics *d = vcam_shm_diag_ptr();
+    if (!d) return;
+    atomic_store_explicit(&d->declinedFormat, fourCC, memory_order_relaxed);
+    atomic_fetch_add_explicit(&d->framesDeclined, 1, memory_order_relaxed);
 }
 
 // -- State ----------------------------------------------------------------
@@ -83,6 +86,7 @@ void vcam_diag_read(VCamDiagnostics *out) {
     VCAM_LOAD(iosVersion);
     VCAM_LOAD(lastError);
     VCAM_LOAD(daemonPid);
+    VCAM_LOAD(framesDeclined);
 
 #undef VCAM_LOAD
 }
@@ -95,6 +99,7 @@ void vcam_diag_reset_counters(void) {
     atomic_store_explicit(&d->framesDriven,   0, memory_order_relaxed);
     atomic_store_explicit(&d->renders,        0, memory_order_relaxed);
     atomic_store_explicit(&d->cacheHits,      0, memory_order_relaxed);
+    atomic_store_explicit(&d->framesDeclined, 0, memory_order_relaxed);
 }
 
 // -- Names ----------------------------------------------------------------

@@ -214,8 +214,10 @@ static const VCamHookInfo kHooks[] = {
                                       rows:daemonRows]];
 
     // ---- Frames ------------------------------------------------------
-    // The headline number. Frames seen with nothing replaced is the single
-    // symptom common to every way substitution can silently fail.
+    // The headline numbers. Seen with nothing replaced AND nothing declined is
+    // the symptom of a real interception failure; declined frames are a
+    // deliberate, safe pass-through of a format we will not fake.
+    uint64_t declinedCount = atomic_load(&d.framesDeclined);
     uint64_t delivered = replaced + driven;
     BOOL substituting  = delivered > 0;
     NSString *framesFooter;
@@ -227,13 +229,20 @@ static const VCamHookInfo kHooks[] = {
         framesFooter = @"No camera frames have been seen at all. Open a camera "
                         "app while this screen is visible and the counters "
                         "should start moving.";
+    } else if (!substituting && declinedCount > 0) {
+        framesFooter = @"This app asked the camera for a pixel format we do not "
+                        "synthesise (often 10-bit HDR or a depth format), so its "
+                        "frames are passed through untouched rather than faked — "
+                        "which is why it shows the real camera here instead of "
+                        "crashing. Declined counts those frames.";
     } else if (!substituting) {
-        framesFooter = @"Frames are flowing but none are ours. The arbiter "
-                        "escalates automatically after a few seconds of this; "
-                        "check which hooks installed below.";
+        framesFooter = @"Frames are flowing but none are ours and none were "
+                        "declined — a genuine interception miss. Check which "
+                        "hooks installed below.";
     } else {
         framesFooter = @"Replaced counts substitutions at a sink. Driven counts "
-                        "frames pushed by our own timer when the graph stalled.";
+                        "frames pushed by our own timer when the graph stalled. "
+                        "Declined counts frames passed through on purpose.";
     }
 
     [out addObject:[VCamDiagSection header:@"Frames" footer:framesFooter rows:@[
@@ -242,9 +251,13 @@ static const VCamHookInfo kHooks[] = {
                      value:[self formatCount:replaced]
                       note:nil
                      color:substituting ? UIColor.systemGreenColor
-                                        : (seen && st.enabled && !st.paused
+                                        : (seen && st.enabled && !st.paused && !declinedCount
                                             ? UIColor.systemRedColor : nil)],
         [VCamDiagRow label:@"Driven"   value:[self formatCount:driven]],
+        [VCamDiagRow label:@"Declined"
+                     value:[self formatCount:declinedCount]
+                      note:nil
+                     color:declinedCount ? UIColor.systemOrangeColor : nil],
     ]]];
 
     // ---- Hooks -------------------------------------------------------
