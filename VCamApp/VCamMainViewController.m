@@ -707,9 +707,14 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
         // Killing the daemon makes launchd respawn it, which re-runs injection.
         // posix_spawn rather than system(): system() is marked unavailable in
         // the iOS SDK and will not compile.
-        BOOL ok = [weakSelf spawnKillall:"cameracaptured"]
-                | [weakSelf spawnKillall:"mediaserverd"];
-        if (!ok) {
+        //
+        // Both are attempted deliberately -- which daemon hosts the capture
+        // graph depends on the iOS version, and signalling the wrong one is
+        // harmless. Separate statements rather than `||` so neither is
+        // short-circuited away.
+        BOOL killedCaptured = [weakSelf spawnKillall:"cameracaptured"];
+        BOOL killedMediaserverd = [weakSelf spawnKillall:"mediaserverd"];
+        if (!killedCaptured && !killedMediaserverd) {
             [weakSelf alert:@"Could Not Restart"
                     message:@"The daemon could not be signalled from here. "
                              "Toggling VCam off and on, or a respring, has the "

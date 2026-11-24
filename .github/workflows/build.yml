@@ -10,9 +10,67 @@ on:
     types: [created]
 
 jobs:
+  # Semantic check against a real iOS SDK, on Linux.
+  #
+  # The macOS jobs below produce the actual packages, but hosted macOS arm64
+  # runners are capacity-constrained and can sit queued for a long time or not
+  # be acquired at all. Compiling is the only way to catch a real error, so this
+  # job does it somewhere always available: clang can target arm64-apple-ios
+  # with the real SDK and report every syntax and semantic error without
+  # producing an object file, so no Mach-O linker is needed.
+  check:
+    name: syntax check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install clang and perl
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang perl
+
+      - name: Cache Theos and SDK
+        id: theos-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/theos
+          key: theos-linux-check-v1
+
+      - name: Fetch Theos and one iOS SDK
+        if: steps.theos-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          git clone -q --recursive --depth 1 \
+            https://github.com/theos/theos.git ~/theos
+
+          # Sparse checkout: the SDK repo carries every SDK and is several
+          # gigabytes, but one is enough to check against.
+          git clone -q --depth 1 --filter=blob:none --sparse \
+            https://github.com/theos/sdks.git ~/theos/sdks
+          cd ~/theos/sdks
+          SDK="$(git ls-tree --name-only HEAD | grep -o 'iPhoneOS[0-9.]*\.sdk' \
+                 | sort -V | tail -1)"
+          echo "using $SDK"
+          git sparse-checkout set "$SDK"
+          du -sh ~/theos/sdks
+
+      - name: Check
+        run: THEOS=$HOME/theos ./tools/syntax-check.sh
+
   build:
     name: ${{ matrix.scheme }}
+    # Intel rather than arm64: the hosted macOS arm64 pool is capacity
+    # constrained and repeatedly failed to acquire a runner at all. Theos
+    # cross-compiles to arm64 iOS either way, so the host architecture does not
+    # affect the output.
     runs-on: macos-26-intel
+
+    # Gated on the Linux check so a scarce macOS runner is never spent on code
+    # that does not compile.
+    needs: check
 
     strategy:
       fail-fast: false

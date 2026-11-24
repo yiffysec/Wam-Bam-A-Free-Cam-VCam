@@ -7,6 +7,30 @@
 #include <os/lock.h>
 #include <dispatch/dispatch.h>
 
+// -- Paths ----------------------------------------------------------------
+// These live here, in the lowest-level shared header, rather than alongside the
+// shared-memory layout. They are referenced as `@kVCamConfigPath` in several
+// files, and a translation unit that has the ObjC `@` but not the macro fails
+// with "unexpected '@' in program" -- which points at the wrong thing entirely.
+// Keeping them in the header everything already includes avoids that trap.
+//
+// Deliberately outside any jailbreak prefix: /var/mobile/Library is a real path
+// under rootful, rootless and roothide alike, so the daemon, the app and the
+// HUD all agree on it without any jbroot() translation.
+#define kVCamLibraryDir     "/var/mobile/Library/WamBamVCam"
+#define kVCamConfigPath     kVCamLibraryDir "/Config.plist"
+#define kVCamMediaPath      kVCamLibraryDir "/source"      // + ext (.mov/.jpg/...)
+#define kVCamShmPath        kVCamLibraryDir "/vcam.shm"
+#define kVCamKillSwitchPath kVCamLibraryDir "/killswitch"
+
+// -- Darwin notification names --------------------------------------------
+#define kVCamNotifyConfigChanged  "com.yiffysec.wambamvcam/config-changed"
+#define kVCamNotifyMediaChanged   "com.yiffysec.wambamvcam/media-changed"
+#define kVCamNotifyToggleHUD      "com.yiffysec.wambamvcam/toggle-hud"
+#define kVCamNotifyHUDPing        "com.yiffysec.wambamvcam/hud-ping"
+#define kVCamNotifyHUDPong        "com.yiffysec.wambamvcam/hud-pong"
+#define kVCamNotifyClientChanged  "com.yiffysec.wambamvcam/client-changed"
+
 // ── OS version helpers ─────────────────────────────────────────────────────
 // Use at runtime; these are not compile-time constants.
 #ifndef VCAM_IOS_AT_LEAST

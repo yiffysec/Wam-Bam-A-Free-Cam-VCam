@@ -22,20 +22,9 @@
 #include <stdatomic.h>
 #include <dispatch/dispatch.h>
 
-// -- Paths (resolve through jbroot() on roothide) --------------------------
-#define kVCamLibraryDir     "/var/mobile/Library/WamBamVCam"
-#define kVCamConfigPath     kVCamLibraryDir "/Config.plist"
-#define kVCamMediaPath      kVCamLibraryDir "/source"      // + ext (.mov/.jpg/.png)
-#define kVCamShmPath        kVCamLibraryDir "/vcam.shm"
-#define kVCamKillSwitchPath kVCamLibraryDir "/killswitch"  // exists = disable injection
-
-// -- Darwin notification names --------------------------------------------
-#define kVCamNotifyConfigChanged  "com.yiffysec.wambamvcam/config-changed"
-#define kVCamNotifyMediaChanged   "com.yiffysec.wambamvcam/media-changed"
-#define kVCamNotifyToggleHUD      "com.yiffysec.wambamvcam/toggle-hud"
-#define kVCamNotifyHUDPing        "com.yiffysec.wambamvcam/hud-ping"
-#define kVCamNotifyHUDPong        "com.yiffysec.wambamvcam/hud-pong"
-#define kVCamNotifyClientChanged  "com.yiffysec.wambamvcam/client-changed"
+// Paths, notification names and logging. Included here so that anything using
+// the shared state gets them too, wherever it came in from.
+#include "VCamTypes.h"
 
 // -- Rotation constants ----------------------------------------------------
 typedef enum : int32_t {

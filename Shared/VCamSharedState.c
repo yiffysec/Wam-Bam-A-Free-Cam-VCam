@@ -138,30 +138,40 @@ void vcam_shm_read(VCamSharedState *out) {
         return;
     }
 
-    uint32_t seq1, seq2;
-    int spins = 0;
-    do {
-        seq1 = atomic_load_explicit(&g_shm->seq, memory_order_acquire);
-        if (seq1 & 1u) {
-            // Writer mid-update. Yield rather than burn the frame deadline.
-            if (++spins > 1000) {
-                memset(out, 0, sizeof(*out));
-                out->zoom = kVCamDefaultZoom;
-                return;
-            }
-            continue;
-        }
+    // Written as an explicit loop rather than do/while. An earlier version used
+    // `continue` for the odd-sequence case, which jumped straight to a
+    // `while (seq1 != seq2)` test with seq2 still uninitialised -- so if the
+    // stack garbage happened to match seq1 the loop exited and the caller got
+    // an unvalidated copy, `enabled` included. In the camera daemon that reads
+    // as the virtual camera turning itself on or off at random.
+    for (int spins = 0; spins < 1000; spins++) {
+        uint32_t seq1 = atomic_load_explicit(&g_shm->seq, memory_order_acquire);
+
+        // Odd means a writer is mid-update. Retry.
+        if (seq1 & 1u) continue;
+
         memcpy((uint8_t *)out   + kVCamStateBodyOffset,
                (uint8_t *)g_shm + kVCamStateBodyOffset,
                kVCamStateBodySize);
+
         atomic_thread_fence(memory_order_acquire);
-        seq2 = atomic_load_explicit(&g_shm->seq, memory_order_acquire);
-    } while (seq1 != seq2);
 
-    out->seq = seq1;
+        uint32_t seq2 = atomic_load_explicit(&g_shm->seq, memory_order_acquire);
+        if (seq1 != seq2) continue;   // torn read; the writer moved under us
 
-    // Defensive: a corrupt or never-initialised region must not divide by zero.
-    if (!(out->zoom > 0.0f)) out->zoom = kVCamDefaultZoom;
+        out->seq = seq1;
+
+        // A corrupt or never-initialised region must not divide by zero in the
+        // frame engine.
+        if (!(out->zoom > 0.0f)) out->zoom = kVCamDefaultZoom;
+        return;
+    }
+
+    // Spun out. A writer holding the lock this long means something is very
+    // wrong, and safe defaults beat a torn read.
+    VCamLogE("shm_read: spun out waiting for a stable sequence");
+    memset(out, 0, sizeof(*out));
+    out->zoom = kVCamDefaultZoom;
 }
 
 // -- internal writer ------------------------------------------------------

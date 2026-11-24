@@ -40,7 +40,7 @@
 }
 
 - (void)commit {
-    NSDictionary *copy;
+    __block NSDictionary *copy;
     dispatch_sync(_q, ^{ copy = [_dict copy]; });
 
     [[NSFileManager defaultManager] createDirectoryAtPath:@kVCamLibraryDir

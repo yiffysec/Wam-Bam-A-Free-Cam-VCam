@@ -17,3 +17,6 @@ obj/
 
 # Logs
 *.log
+
+# syntax-check harness output
+.syntax-check/

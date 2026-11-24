@@ -215,8 +215,11 @@ static const VCamHookInfo kHooks[] = {
                                          color:color]];
     }
 
+    // "4 of 6" is more useful than "4": the denominator is how many of these
+    // classes exist on this iOS release at all.
     [out addObject:[VCamDiagSection
-        header:[NSString stringWithFormat:@"Hooks — %d installed", installedCount]
+        header:[NSString stringWithFormat:@"Hooks — %d of %d installed",
+                 installedCount, attemptedCount]
         footer:@"\"Absent\" means the class does not exist on this iOS release, "
                 "which is expected for some of these. \"Failed\" means it exists "
                 "but its signature did not match what we know how to call — "
