@@ -46,13 +46,21 @@ jobs:
           git clone -q --recursive --depth 1 \
             https://github.com/theos/theos.git ~/theos
 
-          # Sparse checkout: the SDK repo carries every SDK and is several
-          # gigabytes, but one is enough to check against.
+          # Theos ships sdks/ with a .keep placeholder, so cloning into it
+          # fails with "already exists and is not an empty directory".
+          rm -rf ~/theos/sdks
+
+          # Sparse checkout: the SDK repo carries every SDK and is well over a
+          # gigabyte, but one is enough to check against.
           git clone -q --depth 1 --filter=blob:none --sparse \
             https://github.com/theos/sdks.git ~/theos/sdks
           cd ~/theos/sdks
           SDK="$(git ls-tree --name-only HEAD | grep -o 'iPhoneOS[0-9.]*\.sdk' \
                  | sort -V | tail -1)"
+          if [ -z "$SDK" ]; then
+            echo "could not determine an SDK to check against" >&2
+            exit 1
+          fi
           echo "using $SDK"
           git sparse-checkout set "$SDK"
           du -sh ~/theos/sdks
