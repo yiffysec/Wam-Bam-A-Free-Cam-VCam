@@ -50,6 +50,7 @@
 #import "VCamSharedState.h"
 #import "VCamDiagnostics.h"
 #import "VCamFrameEngine.h"
+#import "VCamPaths.h"
 #import "VCamFrameVariant.h"
 #import "VCamPixelConverter.h"
 
@@ -499,6 +500,73 @@ static int vcam_install_discovered_hooks(void) {
 }
 
 // =========================================================================
+//  Capture-graph dump (diagnostics, not a hook)
+// =========================================================================
+// Writes every BW* node class present on this device, flagging which respond to
+// the render selector we drive and which look recording-related, to a
+// world-readable text file the app can show. The point is to identify the nodes
+// we do NOT yet hook -- above all the movie-recording encoder, which is why a
+// recorded clip still captures the real camera -- without guessing a class name
+// and risking a daemon crash by hooking the wrong one.
+static void vcam_dump_graph_classes(void) {
+    unsigned count = 0;
+    Class *classes = objc_copyClassList(&count);
+    if (!classes) return;
+
+    SEL render = @selector(renderSampleBuffer:forInput:);
+    SEL emit   = @selector(emitSampleBuffer:);
+
+    NSMutableString *dump = [NSMutableString string];
+    [dump appendString:@"# Wam Bam VCam -- capture graph node classes\n"];
+    [dump appendString:@"# flags: [R]=renderSampleBuffer:forInput:  "
+                        "[E]=emitSampleBuffer:  [*]=looks recording-related\n\n"];
+
+    NSMutableArray<NSString *> *names = [NSMutableArray array];
+    for (unsigned i = 0; i < count; i++) {
+        const char *n = class_getName(classes[i]);
+        if (!n || strncmp(n, "BW", 2) != 0) continue;
+        [names addObject:@(n)];
+    }
+    free(classes);
+    [names sortUsingSelector:@selector(caseInsensitiveCompare:)];
+
+    for (NSString *name in names) {
+        Class cls = objc_getClass(name.UTF8String);
+        if (!cls) continue;
+        BOOL r = [cls instancesRespondToSelector:render];
+        BOOL e = [cls instancesRespondToSelector:emit];
+
+        // Only list nodes that actually move sample buffers, or whose name
+        // points at the recording/encode/write path -- the full BW* list is
+        // long and mostly irrelevant.
+        BOOL recordish =
+            [name containsString:@"Encoder"] || [name containsString:@"Record"] ||
+            [name containsString:@"Movie"]   || [name containsString:@"Writer"]  ||
+            [name containsString:@"File"]     || [name containsString:@"Video"];
+        if (!r && !e && !recordish) continue;
+
+        [dump appendFormat:@"%@%@%@ %@\n",
+            r ? @"[R]" : @"[ ]",
+            e ? @"[E]" : @"[ ]",
+            recordish ? @"[*]" : @"[ ]",
+            name];
+    }
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+    [fm createDirectoryAtPath:VCamLibraryDir()
+  withIntermediateDirectories:YES
+                   attributes:@{ NSFilePosixPermissions: @(0777) }
+                        error:nil];
+    NSString *path = VCamGraphDumpPath();
+    [dump writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    [fm setAttributes:@{ NSFilePosixPermissions: @(0644) }
+         ofItemAtPath:path error:nil];
+
+    VCamLogI("graph: dumped %lu node classes to %{public}@",
+             (unsigned long)names.count, path);
+}
+
+// =========================================================================
 //  The arbiter
 // =========================================================================
 // Escalates when real frames are flowing and none of them are being replaced.
@@ -673,6 +741,11 @@ void vcam_install_hooks(void) {
     }
 
     vcam_diag_set_hooks(g_hooksAttempted, g_hooksInstalled);
+
+    // Record the graph so the recording node can be identified from the app.
+    @try { vcam_dump_graph_classes(); }
+    @catch (NSException *ex) { VCamLogE("graph dump: %{public}@", ex.reason); }
+
     vcam_start_arbiter();
 
     VCamLogI("install: complete -- attempted 0x%02x installed 0x%02x tier %{public}s",

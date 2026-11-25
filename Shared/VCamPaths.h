@@ -72,6 +72,12 @@ NSString *VCamLoadingStampPath(void);
 /// "daemon never loaded". A plain plist the no-sandbox app can always read.
 NSString *VCamBreadcrumbPath(void);
 
+/// A dump of the capture-graph node classes present on this device, written by
+/// the daemon at hook-install time. Lets the graph be inspected from the app
+/// (no Mac/log stream needed) to identify nodes we do not yet hook -- the movie
+/// recording encoder in particular.
+NSString *VCamGraphDumpPath(void);
+
 /// Media and audio bases. Append the real extension before use.
 NSString *VCamMediaBasePath(void);   // .../source
 NSString *VCamAudioBasePath(void);   // .../audio

@@ -39,6 +39,9 @@ NSString *VCamLoadingStampPath(void) {
 NSString *VCamBreadcrumbPath(void) {
     return [VCamLibraryDir() stringByAppendingPathComponent:@"daemon.breadcrumb"];
 }
+NSString *VCamGraphDumpPath(void) {
+    return [VCamLibraryDir() stringByAppendingPathComponent:@"graph.txt"];
+}
 NSString *VCamMediaBasePath(void) {
     return [VCamLibraryDir() stringByAppendingPathComponent:@"source"];
 }

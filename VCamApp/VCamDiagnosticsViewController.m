@@ -341,6 +341,48 @@ static const VCamHookInfo kHooks[] = {
         [VCamDiagRow label:@"HUD alive" value:st.hudAlive ? @"Yes" : @"No"],
     ]]];
 
+    // ---- Capture graph ----------------------------------------------
+    // Nodes the daemon found. The ones flagged recording-related ([*]) and not
+    // marked hooked are the candidates for why a recorded clip still captures
+    // the real camera. Full list is in Copy.
+    NSString *graph = [NSString stringWithContentsOfFile:VCamGraphDumpPath()
+                                                encoding:NSUTF8StringEncoding
+                                                   error:nil];
+    if (graph.length) {
+        NSMutableArray<VCamDiagRow *> *graphRows = [NSMutableArray array];
+        NSUInteger total = 0;
+        for (NSString *line in [graph componentsSeparatedByString:@"\n"]) {
+            if (![line hasPrefix:@"["]) continue;   // skip comments/blanks
+            total++;
+            if (![line containsString:@"[*]"]) continue;   // show recording-ish
+            // "[R][ ][*] BWSomeNode" -> flags + name
+            NSRange sp = [line rangeOfString:@" "];
+            if (sp.location == NSNotFound) continue;
+            NSString *flags = [line substringToIndex:sp.location];
+            NSString *name  = [[line substringFromIndex:sp.location + 1]
+                               stringByTrimmingCharactersInSet:
+                                   NSCharacterSet.whitespaceCharacterSet];
+            BOOL nodeRenders = [flags hasPrefix:@"[R]"];
+            [graphRows addObject:
+                [VCamDiagRow label:name
+                             value:nodeRenders ? @"render" : @"—"
+                              note:nil
+                             color:nodeRenders ? nil : UIColor.secondaryLabelColor]];
+        }
+        if (graphRows.count == 0) {
+            [graphRows addObject:[VCamDiagRow label:@"No recording-related nodes"
+                                             value:@""]];
+        }
+        [out addObject:[VCamDiagSection
+            header:[NSString stringWithFormat:@"Capture Graph — %lu nodes",
+                     (unsigned long)total]
+            footer:@"Recording-related nodes found on this device. A node marked "
+                    "“render” that we do not yet hook is the likely reason a "
+                    "recorded video still shows the real camera. Use Copy for the "
+                    "full node list."
+              rows:graphRows]];
+    }
+
     self.sections = out;
     [self.tableView reloadData];
 }
@@ -367,6 +409,17 @@ static const VCamHookInfo kHooks[] = {
         for (VCamDiagRow *r in sec.rows) {
             [s appendFormat:@"  %-22s %@\n", r.label.UTF8String, r.value];
         }
+        [s appendString:@"\n"];
+    }
+
+    // The full capture-graph dump -- every node, not just the recording-related
+    // ones shown on screen -- so the whole graph can be read off one copy.
+    NSString *graph = [NSString stringWithContentsOfFile:VCamGraphDumpPath()
+                                                encoding:NSUTF8StringEncoding
+                                                   error:nil];
+    if (graph.length) {
+        [s appendString:@"== Full capture graph ==\n"];
+        [s appendString:graph];
         [s appendString:@"\n"];
     }
 
