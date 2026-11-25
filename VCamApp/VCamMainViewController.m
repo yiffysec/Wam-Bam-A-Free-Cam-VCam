@@ -427,22 +427,53 @@ typedef NS_ENUM(NSInteger, VCamRowKind) {
     ]]];
 
     // ---- Audio --------------------------------------------------------
-    [s addObject:[VCamSection
-        header:@"Audio"
-        footer:@"With the real microphone on, apps hear your surroundings while seeing "
-                "your media. Turn it off and supply a file to replace the microphone too."
-          rows:@[
-        [VCamRow switchRow:@"Use Real Microphone"
-                  subtitle:nil
-                       get:^BOOL { return cfg.useRealAudio; }
-                       set:^(BOOL v) { cfg.useRealAudio = v; [weakSelf rebuildSections]; }],
-        [VCamRow disclosureRow:@"Custom Audio File"
-                         value:^NSString * {
-            NSString *p = cfg.audioPath;
-            return p.length ? p.lastPathComponent : @"None";
-        }
-                        action:^{ [weakSelf presentDocumentPickerForAudio:YES]; }],
-    ]]];
+    NSMutableArray<VCamRow *> *audioRows = [NSMutableArray arrayWithObject:
+        [VCamRow segmentRow:@"Sound"
+                     titles:@[@"None", @"Video", @"Mic", @"Custom"]
+                     values:@[@(VCamAudioNone), @(VCamAudioVideo),
+                              @(VCamAudioMicrophone), @(VCamAudioCustom)]
+                        get:^NSInteger { return cfg.audioMode; }
+                        set:^(NSInteger v) {
+            cfg.audioMode = (VCamAudioMode)v;
+            [weakSelf rebuildSections];   // reveal mute / custom rows as needed
+        }]];
+
+    // Mute is only meaningful for the live microphone, and mirrors the HUD's
+    // mute button.
+    if (cfg.audioMode == VCamAudioMicrophone) {
+        [audioRows addObject:
+            [VCamRow switchRow:@"Mute microphone"
+                      subtitle:@"Same as the HUD mute button"
+                           get:^BOOL { return cfg.audioMuted; }
+                           set:^(BOOL v) { cfg.audioMuted = v; }]];
+    }
+
+    // The custom file only matters in Custom mode.
+    if (cfg.audioMode == VCamAudioCustom) {
+        [audioRows addObject:
+            [VCamRow disclosureRow:@"Custom Audio File"
+                             value:^NSString * {
+                NSString *p = cfg.audioPath;
+                return p.length ? p.lastPathComponent : @"Choose…";
+            }
+                            action:^{ [weakSelf presentDocumentPickerForAudio:YES]; }]];
+    }
+
+    NSString *audioFooter;
+    switch (cfg.audioMode) {
+        case VCamAudioNone:
+            audioFooter = @"Apps and recordings get silence."; break;
+        case VCamAudioVideo:
+            audioFooter = @"Apps and recordings get the imported video's own audio "
+                           "track. A photo source has no audio, so this is silent."; break;
+        case VCamAudioMicrophone:
+            audioFooter = @"Apps hear your real surroundings while seeing your media. "
+                           "Mute here or from the HUD to silence it."; break;
+        case VCamAudioCustom:
+            audioFooter = @"Apps and recordings get your chosen audio file, looped."; break;
+    }
+
+    [s addObject:[VCamSection header:@"Audio" footer:audioFooter rows:audioRows]];
 
     // ---- Targeting ----------------------------------------------------
     [s addObject:[VCamSection
@@ -655,8 +686,9 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
 
     VCamConfig *cfg = [VCamConfig shared];
     if (audio) {
-        cfg.audioPath    = dest;
-        cfg.useRealAudio = NO;
+        // Choosing a custom audio file implies Custom mode.
+        cfg.audioPath = dest;
+        cfg.audioMode = VCamAudioCustom;
     } else {
         cfg.sourceType = isVideo ? VCamSourceVideo : VCamSourcePhoto;
         cfg.sourcePath = dest;

@@ -92,19 +92,29 @@
             <key>cell</key>       <string>PSGroupCell</string>
             <key>label</key>      <string>Audio</string>
             <key>footerText</key>
-            <string>With the real microphone on, apps hear your surroundings while seeing your media.</string>
+            <string>None = silence. Video = the imported video's own audio. Mic = your real surroundings (toggle Mute below or from the HUD). Custom = the audio file below, looped.</string>
+        </dict>
+        <dict>
+            <key>cell</key>       <string>PSSegmentCell</string>
+            <key>key</key>        <string>audioMode</string>
+            <key>label</key>      <string>Sound</string>
+            <key>default</key>    <integer>2</integer>
+            <key>validValues</key>
+            <array><integer>0</integer><integer>1</integer><integer>2</integer><integer>3</integer></array>
+            <key>validTitles</key>
+            <array><string>None</string><string>Video</string><string>Mic</string><string>Custom</string></array>
         </dict>
         <dict>
             <key>cell</key>       <string>PSSwitchCell</string>
-            <key>key</key>        <string>useRealAudio</string>
-            <key>label</key>      <string>Use Real Microphone</string>
-            <key>default</key>    <true/>
+            <key>key</key>        <string>audioMuted</string>
+            <key>label</key>      <string>Mute Microphone</string>
+            <key>default</key>    <false/>
         </dict>
         <dict>
             <key>cell</key>       <string>PSEditTextCell</string>
             <key>key</key>        <string>audioPath</string>
             <key>label</key>      <string>Custom Audio</string>
-            <key>placeholder</key><string>/var/mobile/Library/WamBamVCam/audio.m4a</string>
+            <key>placeholder</key><string>pick in the app</string>
         </dict>
 
         <dict>

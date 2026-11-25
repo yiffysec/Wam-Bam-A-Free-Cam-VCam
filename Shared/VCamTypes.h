@@ -86,7 +86,9 @@ static inline os_log_t vcam_log(void) {
 #define kVCamPrefRotation       "rotation"
 #define kVCamPrefMirrorH        "mirrorH"
 #define kVCamPrefMirrorV        "mirrorV"
-#define kVCamPrefUseRealAudio   "useRealAudio"
+#define kVCamPrefUseRealAudio   "useRealAudio"   // legacy; migrated to audioMode
+#define kVCamPrefAudioMode      "audioMode"
+#define kVCamPrefAudioMuted     "audioMuted"
 #define kVCamPrefHUDEnabled     "hudEnabled"
 #define kVCamPrefPerAppEnabled  "perAppEnabled"
 #define kVCamPrefPerAppList     "perAppList"

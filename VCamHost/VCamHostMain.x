@@ -35,6 +35,7 @@
 #import "VCamPaths.h"
 #import "VCamBootGuard.h"
 #import "VCamFrameEngine.h"
+#import "VCamAudioEngine.h"
 #import "VCamMediaSource.h"
 #import "VCamPixelConverter.h"
 
@@ -260,12 +261,16 @@ static void VCamHostInit(void) {
         vcam_notify_observe(kVCamNotifyConfigChanged, cfgQueue, ^{
             [VCamMediaSource.sharedSource reloadConfig];
             [VCamFrameEngine.sharedEngine applyConfig];
+            [VCamAudioEngine.sharedEngine
+                configureWithSource:VCamMediaSource.sharedSource];
         });
 
         vcam_notify_observe(kVCamNotifyMediaChanged, cfgQueue, ^{
             [VCamMediaSource.sharedSource reloadMedia];
             [VCamFrameEngine.sharedEngine
                 restartWithSource:VCamMediaSource.sharedSource];
+            [VCamAudioEngine.sharedEngine
+                configureWithSource:VCamMediaSource.sharedSource];
         });
 
         // Safety net for a dropped notification: a slow poll of the plist.
@@ -283,6 +288,7 @@ static void VCamHostInit(void) {
         dispatch_resume(g_configPoll);
 
         // 8 -- Start pumping.
+        [VCamAudioEngine.sharedEngine configureWithSource:VCamMediaSource.sharedSource];
         [VCamFrameEngine.sharedEngine start];
 
         // 9 -- Survived startup; clear the crash counter.

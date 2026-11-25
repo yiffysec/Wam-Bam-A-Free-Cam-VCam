@@ -109,9 +109,9 @@ static void vcam_shm_reinit_locked(void) {
     g_shm->version    = kVCamShmVersion;
     g_shm->structSize = (uint16_t)sizeof(VCamSharedRegion);
 
-    g_shm->zoom         = kVCamDefaultZoom;
-    g_shm->hudEnabled   = 1;
-    g_shm->useRealAudio = 1;
+    g_shm->zoom       = kVCamDefaultZoom;
+    g_shm->hudEnabled = 1;
+    g_shm->audioMode  = VCamAudioMicrophone;   // default: real surroundings
 
     // Start even, so the first reader sees a stable value.
     atomic_store_explicit(&g_shm->seq, 2u, memory_order_release);

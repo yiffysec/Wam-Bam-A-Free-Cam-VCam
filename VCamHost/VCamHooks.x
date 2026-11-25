@@ -50,6 +50,7 @@
 #import "VCamSharedState.h"
 #import "VCamDiagnostics.h"
 #import "VCamFrameEngine.h"
+#import "VCamAudioEngine.h"
 #import "VCamPaths.h"
 #import "VCamFrameVariant.h"
 #import "VCamPixelConverter.h"
@@ -99,6 +100,7 @@ static VCamRenderFn orig_photoEncoder_render = NULL;
 static VCamRenderFn orig_stillImage_render   = NULL;
 static VCamRenderFn orig_stillScaler_render  = NULL;
 static VCamRenderFn orig_videoComp_render    = NULL;
+static VCamRenderFn orig_audioConv_render    = NULL;
 
 static uint32_t g_hooksAttempted = 0;
 static uint32_t g_hooksInstalled = 0;
@@ -322,6 +324,32 @@ static void hook_stillScaler_render(id self, SEL _cmd, CMSampleBufferRef sb, id 
 static void hook_videoComp_render(id self, SEL _cmd, CMSampleBufferRef sb, id in) {
     vcam_substitute(self, _cmd, sb, in, orig_videoComp_render,
                     kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
+}
+
+// BWAudioConverterNode receives the microphone audio before it splits to the
+// recording file and to apps. Replacing it here covers every audio consumer at
+// once. The audio engine decides per mode: pass the real mic through (NULL),
+// silence it (None or muted), or fill it with the video's / a custom file's
+// audio -- always in the original buffer's exact format, so the stream's shape
+// is untouched.
+static void hook_audioConv_render(id self, SEL _cmd, CMSampleBufferRef sb, id in) {
+    if (!orig_audioConv_render) return;
+
+    if (!vcam_should_replace()) { orig_audioConv_render(self, _cmd, sb, in); return; }
+
+    VCamSharedState st;
+    vcam_shm_read(&st);
+
+    CMSampleBufferRef replacement =
+        [VCamAudioEngine.sharedEngine replacementForBuffer:sb
+                                                      mode:st.audioMode
+                                                     muted:(st.audioMuted != 0)];
+    if (replacement) {
+        orig_audioConv_render(self, _cmd, replacement, in);
+        CFRelease(replacement);
+    } else {
+        orig_audioConv_render(self, _cmd, sb, in);   // pass the real mic through
+    }
 }
 
 // =========================================================================
@@ -733,6 +761,12 @@ void vcam_install_hooks(void) {
         vcam_hook_render("BWVideoCompressorNode",
                          hook_videoComp_render, &orig_videoComp_render,
                          kVCamHookVideoComp);
+
+        // Microphone: substitute the audio entering the converter, before it
+        // splits to the recording and to apps.
+        vcam_hook_render("BWAudioConverterNode",
+                         hook_audioConv_render, &orig_audioConv_render,
+                         kVCamHookAudioConv);
     } @catch (NSException *ex) {
         VCamLogE("install: exception %{public}@ -- keeping the partial hook set",
                  ex.reason);

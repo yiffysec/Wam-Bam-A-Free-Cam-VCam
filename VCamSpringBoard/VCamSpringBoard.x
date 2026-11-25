@@ -37,6 +37,7 @@ static void vcam_update_hud_visibility(void);
     UIButton *_toggleBtn;
     UIButton *_pauseBtn;
     UIButton *_mirrorBtn;
+    UIButton *_muteBtn;
     UIView   *_indicator;
     UILabel  *_statusLabel;
     CGPoint   _panStartOrigin;
@@ -94,6 +95,18 @@ static void vcam_update_hud_visibility(void);
          forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:_mirrorBtn];
 
+    // Mute, full width below the others. Shown only in Microphone audio mode;
+    // the window grows to make room (see -refresh). Starts hidden.
+    _muteBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    _muteBtn.frame              = CGRectMake(6, 85, 76, 24);
+    _muteBtn.layer.cornerRadius = 6;
+    _muteBtn.titleLabel.font    = [UIFont systemFontOfSize:11 weight:UIFontWeightBold];
+    [_muteBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    [_muteBtn addTarget:self action:@selector(muteTapped)
+       forControlEvents:UIControlEventTouchUpInside];
+    _muteBtn.hidden = YES;
+    [self.view addSubview:_muteBtn];
+
     UIPanGestureRecognizer *pan =
         [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
     [self.view addGestureRecognizer:pan];
@@ -132,6 +145,31 @@ static void vcam_update_hud_visibility(void);
     _mirrorBtn.alpha = st.enabled ? 1.0 : 0.35;
     _mirrorBtn.layer.borderWidth = st.mirrorH ? 1.5 : 0.0;
     _mirrorBtn.layer.borderColor = [UIColor whiteColor].CGColor;
+
+    // Mute belongs to live-microphone mode only. Show it there and grow the
+    // window to fit; hide it and shrink back otherwise.
+    BOOL micMode = (st.audioMode == VCamAudioMicrophone);
+    _muteBtn.hidden = !micMode;
+    if (micMode) {
+        BOOL muted = (st.audioMuted != 0);
+        [_muteBtn setTitle:(muted ? @"MIC MUTED" : @"MIC LIVE")
+                  forState:UIControlStateNormal];
+        _muteBtn.backgroundColor = muted
+            ? [UIColor systemRedColor]
+            : [[UIColor systemGreenColor] colorWithAlphaComponent:0.85];
+        _muteBtn.alpha = st.enabled ? 1.0 : 0.35;
+    }
+
+    // Resize the floating window to match whether the mute row is present.
+    UIWindow *win = self.view.window;
+    if (win) {
+        CGFloat wantH = micMode ? 118 : 88;
+        if (fabs(win.frame.size.height - wantH) > 0.5) {
+            CGRect f = win.frame;
+            f.size.height = wantH;
+            win.frame = f;
+        }
+    }
 }
 
 - (void)toggleTapped {
@@ -159,6 +197,15 @@ static void vcam_update_hud_visibility(void);
     cfg.mirrorH = !cfg.mirrorH;
     [self refresh];
     [self haptic:UIImpactFeedbackStyleLight];
+}
+
+- (void)muteTapped {
+    VCamConfig *cfg = [VCamConfig shared];
+    [cfg reload];
+    if (cfg.audioMode != VCamAudioMicrophone) return;   // mute is mic-only
+    cfg.audioMuted = !cfg.audioMuted;
+    [self refresh];
+    [self haptic:UIImpactFeedbackStyleMedium];
 }
 
 - (void)haptic:(UIImpactFeedbackStyle)style {

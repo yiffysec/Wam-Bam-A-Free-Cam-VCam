@@ -48,6 +48,19 @@ typedef enum : uint8_t {
     VCamFitStretch  = 2,   // stretch to fill (ignores aspect ratio)
 } VCamFitMode;
 
+// -- Audio mode -----------------------------------------------------------
+// What the microphone delivers while the vcam is active. The real mic is passed
+// through ONLY in Microphone mode when not muted; every other mode (and a muted
+// mic) substitutes, with silence as the safe fallback -- so "no sound" and the
+// other modes can never accidentally leak live mic audio, the audio equivalent
+// of the real-camera flash.
+typedef enum : uint8_t {
+    VCamAudioNone       = 0,   // silence
+    VCamAudioVideo      = 1,   // the imported video's own audio track
+    VCamAudioMicrophone = 2,   // live mic pass-through (honours audioMuted)
+    VCamAudioCustom     = 3,   // a custom imported audio file
+} VCamAudioMode;
+
 // -- Shared-memory header identity ----------------------------------------
 // vcam.shm is a file, so it survives process restarts AND package upgrades. If
 // the layout below ever changes without this magic/version changing with it, a
@@ -57,8 +70,11 @@ typedef enum : uint8_t {
 // the region from scratch on any mismatch.
 //
 // BUMP kVCamShmVersion ON EVERY CHANGE TO VCamSharedState OR VCamDiagnostics.
+// v5: adds audioMode/audioMuted to the state. A device still carrying the v4
+// region (crash-fix build) has a different layout here, so the version change
+// forces a clean reinitialise rather than a misread.
 #define kVCamShmMagic   ((uint32_t)0x57424643u)   // 'WBFC'
-#define kVCamShmVersion ((uint16_t)4u)
+#define kVCamShmVersion ((uint16_t)5u)
 
 // -- Shared hot-path state (one cache line, seqlock-protected) ------------
 // Writer bumps seq to odd before writing and to even after. Readers loop
@@ -83,13 +99,14 @@ typedef struct __attribute__((aligned(64))) {
     uint8_t           mirrorH;          // 32 : horizontal mirror
     uint8_t           mirrorV;          // 33
     uint8_t           hudEnabled;       // 34 : user wants the SpringBoard HUD
-    uint8_t           useRealAudio;     // 35 : 1 = pass-through mic
+    VCamAudioMode     audioMode;        // 35 : what the microphone delivers
     uint8_t           perAppEnabled;    // 36 : 1 = allow-list mode
     uint8_t           _pad0[3];         // 37 : align the double
     double            hudHeartbeat;     // 40 : CFAbsoluteTime of last HUD pong
     uint8_t           hudAlive;         // 48 : 1 = SpringBoard tweak answered
     uint8_t           clientAllowed;    // 49 : per-app verdict from VCamClient
-    uint8_t           _pad1[14];        // 50 : pad to 64
+    uint8_t           audioMuted;       // 50 : 1 = mute (only meaningful for mic)
+    uint8_t           _pad1[13];        // 51 : pad to 64
 } VCamSharedState;
 
 _Static_assert(sizeof(VCamSharedState) == 64,
@@ -108,6 +125,7 @@ _Static_assert(offsetof(VCamSharedState, enabled) == 12,
 #define kVCamHookStillScaler  (1u << 5)   // BWStillImageScalerNode
 #define kVCamHookDiscovered   (1u << 6)   // anything found by class discovery
 #define kVCamHookVideoComp    (1u << 7)   // BWVideoCompressorNode (movie recording)
+#define kVCamHookAudioConv    (1u << 8)   // BWAudioConverterNode (microphone)
 
 // -- Delivery tiers -------------------------------------------------------
 // Each tier is a different way of getting our pixels to the client. The daemon

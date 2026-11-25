@@ -43,10 +43,10 @@ static VCamSourceType vcam_type_for_path(NSString *path) {
     NSDate          *_mediaMTime;
 }
 
-@synthesize sourceType   = _sourceType;
-@synthesize mediaURL     = _mediaURL;
-@synthesize audioURL     = _audioURL;
-@synthesize useRealAudio = _useRealAudio;
+@synthesize sourceType = _sourceType;
+@synthesize mediaURL   = _mediaURL;
+@synthesize audioURL   = _audioURL;
+@synthesize audioMode  = _audioMode;
 
 + (VCamMediaSource *)sharedSource {
     static VCamMediaSource *s;
@@ -57,10 +57,10 @@ static VCamSourceType vcam_type_for_path(NSString *path) {
 
 - (instancetype)init {
     if (!(self = [super init])) return nil;
-    _q            = dispatch_queue_create("com.yiffysec.vcam.mediasource",
-                                           DISPATCH_QUEUE_SERIAL);
-    _useRealAudio = YES;
-    _sourceType   = VCamSourceNone;
+    _q          = dispatch_queue_create("com.yiffysec.vcam.mediasource",
+                                         DISPATCH_QUEUE_SERIAL);
+    _audioMode  = VCamAudioMicrophone;
+    _sourceType = VCamSourceNone;
     return self;
 }
 
@@ -102,22 +102,36 @@ static VCamSourceType vcam_type_for_path(NSString *path) {
     if (!resolved) type = VCamSourceNone;
 
     // ---- Audio ---------------------------------------------------------
-    NSString *audio = cfg[@kVCamPrefAudioPath];
-    NSURL *audioURL = nil;
-    if ([audio isKindOfClass:NSString.class] && audio.length &&
-        [fm fileExistsAtPath:audio]) {
-        audioURL = [NSURL fileURLWithPath:audio];
+    // Mirror the migration VCamConfig does, so the daemon reads the same value
+    // whether the plist carries the new audioMode or only the legacy flag.
+    VCamAudioMode audioMode;
+    if (cfg[@kVCamPrefAudioMode]) {
+        audioMode = (VCamAudioMode)[cfg[@kVCamPrefAudioMode] integerValue];
+    } else if (cfg[@kVCamPrefUseRealAudio]) {
+        audioMode = [cfg[@kVCamPrefUseRealAudio] boolValue] ? VCamAudioMicrophone
+                                                            : VCamAudioNone;
+    } else {
+        audioMode = VCamAudioMicrophone;
     }
 
-    BOOL realAudio = cfg[@kVCamPrefUseRealAudio]
-                   ? [cfg[@kVCamPrefUseRealAudio] boolValue]
-                   : (audioURL == nil);
+    // The file the active mode needs: the custom file for Custom, the video
+    // itself for Video, nothing for None/Microphone.
+    NSURL *audioURL = nil;
+    if (audioMode == VCamAudioCustom) {
+        NSString *audio = cfg[@kVCamPrefAudioPath];
+        if ([audio isKindOfClass:NSString.class] && audio.length &&
+            [fm fileExistsAtPath:audio]) {
+            audioURL = [NSURL fileURLWithPath:audio];
+        }
+    } else if (audioMode == VCamAudioVideo && type == VCamSourceVideo && resolved) {
+        audioURL = [NSURL fileURLWithPath:resolved];
+    }
 
     // ---- Commit --------------------------------------------------------
-    _sourceType   = type;
-    _mediaURL     = resolved ? [NSURL fileURLWithPath:resolved] : nil;
-    _audioURL     = audioURL;
-    _useRealAudio = realAudio;
+    _sourceType = type;
+    _mediaURL   = resolved ? [NSURL fileURLWithPath:resolved] : nil;
+    _audioURL   = audioURL;
+    _audioMode  = audioMode;
 
     if (resolved) {
         NSDictionary *attrs = [fm attributesOfItemAtPath:resolved error:nil];
@@ -126,8 +140,9 @@ static VCamSourceType vcam_type_for_path(NSString *path) {
         _mediaMTime = nil;
     }
 
-    VCamLogI("media: type=%d path=%{public}@ realAudio=%d",
-             (int)type, resolved.lastPathComponent ?: @"(none)", (int)realAudio);
+    VCamLogI("media: type=%d path=%{public}@ audioMode=%d audioFile=%{public}@",
+             (int)type, resolved.lastPathComponent ?: @"(none)",
+             (int)audioMode, audioURL.lastPathComponent ?: @"(none)");
 }
 
 @end

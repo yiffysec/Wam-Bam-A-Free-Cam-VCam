@@ -24,8 +24,12 @@ NS_ASSUME_NONNULL_BEGIN
 
 @property (nonatomic, readonly) VCamSourceType sourceType;
 @property (nonatomic, readonly, copy, nullable) NSURL *mediaURL;
-@property (nonatomic, readonly, copy, nullable) NSURL *audioURL;  // nil = real mic
-@property (nonatomic, readonly) BOOL useRealAudio;
+
+/// The audio file to use for the active audio mode, or nil when the mode needs
+/// no file (None/Microphone): the imported video's URL for VCamAudioVideo, the
+/// custom audio file for VCamAudioCustom.
+@property (nonatomic, readonly, copy, nullable) NSURL *audioURL;
+@property (nonatomic, readonly) VCamAudioMode audioMode;
 
 @end
 

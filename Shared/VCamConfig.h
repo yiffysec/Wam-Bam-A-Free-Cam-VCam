@@ -50,7 +50,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) BOOL           mirrorH;
 @property (nonatomic, assign) BOOL           mirrorV;
 @property (nonatomic, assign) BOOL           hudEnabled;
-@property (nonatomic, assign) BOOL           useRealAudio;
+@property (nonatomic, assign) VCamAudioMode  audioMode;
+@property (nonatomic, assign) BOOL           audioMuted;
 @property (nonatomic, assign) BOOL           perAppEnabled;
 
 @property (nonatomic, copy, nullable)   NSString *sourcePath;

@@ -116,10 +116,26 @@ VCAM_BOOL_PROP(paused,        setPaused,        kVCamPrefPaused,       NO)
 VCAM_BOOL_PROP(mirrorH,       setMirrorH,       kVCamPrefMirrorH,      NO)
 VCAM_BOOL_PROP(mirrorV,       setMirrorV,       kVCamPrefMirrorV,      NO)
 VCAM_BOOL_PROP(hudEnabled,    setHudEnabled,    kVCamPrefHUDEnabled,   YES)
-VCAM_BOOL_PROP(useRealAudio,  setUseRealAudio,  kVCamPrefUseRealAudio, YES)
+VCAM_BOOL_PROP(audioMuted,    setAudioMuted,    kVCamPrefAudioMuted,   NO)
 VCAM_BOOL_PROP(perAppEnabled, setPerAppEnabled, kVCamPrefPerAppEnabled, NO)
 
 #undef VCAM_BOOL_PROP
+
+// Audio mode, with one-time migration from the old useRealAudio boolean so an
+// upgrade keeps the user's prior choice: real mic -> Microphone, off -> None.
+- (VCamAudioMode)audioMode {
+    id raw = [self objectForKey:@kVCamPrefAudioMode];
+    if (raw) return (VCamAudioMode)[raw integerValue];
+
+    id legacy = [self objectForKey:@kVCamPrefUseRealAudio];
+    if (legacy) return [legacy boolValue] ? VCamAudioMicrophone : VCamAudioNone;
+
+    return VCamAudioMicrophone;   // default: hear the real surroundings
+}
+- (void)setAudioMode:(VCamAudioMode)m {
+    [self setObject:@(m) forKey:@kVCamPrefAudioMode];
+    [self commit];
+}
 
 - (VCamSourceType)sourceType {
     return (VCamSourceType)[self integerForKey:@kVCamPrefSourceType defaultValue:VCamSourceNone];
@@ -220,7 +236,8 @@ VCAM_BOOL_PROP(perAppEnabled, setPerAppEnabled, kVCamPrefPerAppEnabled, NO)
     s.mirrorH       = self.mirrorH       ? 1 : 0;
     s.mirrorV       = self.mirrorV       ? 1 : 0;
     s.hudEnabled    = self.hudEnabled    ? 1 : 0;
-    s.useRealAudio  = self.useRealAudio  ? 1 : 0;
+    s.audioMode     = self.audioMode;
+    s.audioMuted    = self.audioMuted    ? 1 : 0;
     s.perAppEnabled = self.perAppEnabled ? 1 : 0;
     return s;
 }
