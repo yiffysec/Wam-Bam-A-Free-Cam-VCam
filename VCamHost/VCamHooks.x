@@ -98,6 +98,7 @@ static VCamRenderFn orig_remoteQueue_render  = NULL;
 static VCamRenderFn orig_photoEncoder_render = NULL;
 static VCamRenderFn orig_stillImage_render   = NULL;
 static VCamRenderFn orig_stillScaler_render  = NULL;
+static VCamRenderFn orig_videoComp_render    = NULL;
 
 static uint32_t g_hooksAttempted = 0;
 static uint32_t g_hooksInstalled = 0;
@@ -309,6 +310,18 @@ static void hook_stillImage_render(id self, SEL _cmd, CMSampleBufferRef sb, id i
 static void hook_stillScaler_render(id self, SEL _cmd, CMSampleBufferRef sb, id in) {
     vcam_substitute(self, _cmd, sb, in, orig_stillScaler_render,
                     kCVPixelFormatType_32BGRA);
+}
+
+// BWVideoCompressorNode receives the UNCOMPRESSED frame on its way into the
+// H.264/HEVC encoder that feeds movie recording (BWQuickTimeMovieFileSinkNode).
+// The preview sinks are a parallel branch, so without this hook a recording
+// captured the real sensor even while the preview showed our media. Substituting
+// the compressor's input -- an uncompressed 420v frame, same as the video sinks
+// -- puts our content into the recorded file. We hook the input, never the
+// movie-file sink, which only sees already-compressed data.
+static void hook_videoComp_render(id self, SEL _cmd, CMSampleBufferRef sb, id in) {
+    vcam_substitute(self, _cmd, sb, in, orig_videoComp_render,
+                    kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
 }
 
 // =========================================================================
@@ -713,6 +726,13 @@ void vcam_install_hooks(void) {
         vcam_hook_render("BWStillImageScalerNode",
                          hook_stillScaler_render, &orig_stillScaler_render,
                          kVCamHookStillScaler);
+
+        // Movie recording: substitute the uncompressed frame entering the video
+        // encoder, so a recorded clip contains our media rather than the real
+        // sensor feed the parallel preview branch never touched.
+        vcam_hook_render("BWVideoCompressorNode",
+                         hook_videoComp_render, &orig_videoComp_render,
+                         kVCamHookVideoComp);
     } @catch (NSException *ex) {
         VCamLogE("install: exception %{public}@ -- keeping the partial hook set",
                  ex.reason);
@@ -723,7 +743,7 @@ void vcam_install_hooks(void) {
     // go straight to discovery rather than waiting for the arbiter.
     uint32_t sinkBits = kVCamHookImageQueue | kVCamHookRemoteQueue |
                         kVCamHookPhotoEncoder | kVCamHookStillImage |
-                        kVCamHookStillScaler;
+                        kVCamHookStillScaler | kVCamHookVideoComp;
 
     if (g_hooksInstalled & sinkBits) {
         vcam_set_tier(VCamTierSinkHooks);

@@ -56,6 +56,7 @@ static const VCamHookInfo kHooks[] = {
     { kVCamHookPhotoEncoder, "BWPhotoEncoderNode",               "photo capture" },
     { kVCamHookStillImage,   "BWStillImageSampleBufferSinkNode", "still delivery" },
     { kVCamHookStillScaler,  "BWStillImageScalerNode",           "photo scaling" },
+    { kVCamHookVideoComp,    "BWVideoCompressorNode",            "movie recording" },
     { kVCamHookDiscovered,   "discovered sinks",                 "runtime class discovery" },
 };
 

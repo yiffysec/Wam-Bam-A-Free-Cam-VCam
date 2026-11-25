@@ -107,6 +107,7 @@ _Static_assert(offsetof(VCamSharedState, enabled) == 12,
 #define kVCamHookStillImage   (1u << 4)   // BWStillImageSampleBufferSinkNode
 #define kVCamHookStillScaler  (1u << 5)   // BWStillImageScalerNode
 #define kVCamHookDiscovered   (1u << 6)   // anything found by class discovery
+#define kVCamHookVideoComp    (1u << 7)   // BWVideoCompressorNode (movie recording)
 
 // -- Delivery tiers -------------------------------------------------------
 // Each tier is a different way of getting our pixels to the client. The daemon
