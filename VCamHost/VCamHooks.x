@@ -149,13 +149,49 @@ static CMSampleBufferRef vcam_wrap(CMSampleBufferRef original,
                                     CF_RETURNS_RETAINED {
     if (!replacement) return NULL;
 
-    CMVideoFormatDescriptionRef fmt = NULL;
-    OSStatus err = CMVideoFormatDescriptionCreateForImageBuffer(
-                       kCFAllocatorDefault, replacement, &fmt);
-    if (err != noErr || !fmt) {
-        VCamLogE("wrap: format description failed err=%d", (int)err);
-        return NULL;
+    // Carry the real frame's metadata onto our buffer the way a processing step
+    // is meant to: colour primaries, transfer function, YCbCr matrix, chroma
+    // siting and the rest. This both makes our pixels describe themselves
+    // correctly and lets the original format description (below) match our
+    // buffer, so its extensions are preserved instead of lost to a derived one.
+    CVImageBufferRef origImage =
+        original ? CMSampleBufferGetImageBuffer(original) : NULL;
+    if (origImage) {
+        CVBufferPropagateAttachments((CVBufferRef)origImage,
+                                     (CVBufferRef)replacement);
     }
+
+    // Format description: prefer the ORIGINAL's over a freshly derived one.
+    //
+    // A description built with CMVideoFormatDescriptionCreateForImageBuffer
+    // describes only what the pixel buffer itself carries -- it drops the
+    // extensions the capture pipeline attached to the real frame: clean
+    // aperture, pixel aspect ratio, full-range flags, field detail, and the
+    // private capture keys apps and the graph's own downstream nodes read and
+    // assert on. Substituting a buffer whose description is missing those is a
+    // way to crash a host app even when the pixel format itself is one we
+    // support. So when the original's description matches our buffer (same
+    // dimensions, format and colour), we reuse it verbatim and keep every
+    // extension; only when it genuinely does not match do we derive one.
+    CMFormatDescriptionRef fmt = NULL;
+    BOOL ownFmt = NO;
+
+    CMFormatDescriptionRef origFmt =
+        original ? CMSampleBufferGetFormatDescription(original) : NULL;
+    if (origFmt &&
+        CMVideoFormatDescriptionMatchesImageBuffer(origFmt, replacement)) {
+        fmt = (CMFormatDescriptionRef)CFRetain(origFmt);
+        ownFmt = YES;
+    } else {
+        OSStatus derr = CMVideoFormatDescriptionCreateForImageBuffer(
+                            kCFAllocatorDefault, replacement, &fmt);
+        if (derr != noErr || !fmt) {
+            VCamLogE("wrap: format description failed err=%d", (int)derr);
+            return NULL;
+        }
+        ownFmt = YES;
+    }
+    OSStatus err = noErr;
 
     CMSampleTimingInfo timing = {
         .duration              = CMTimeMake(1, kVCamTargetFPS),
@@ -184,7 +220,7 @@ static CMSampleBufferRef vcam_wrap(CMSampleBufferRef original,
     err = CMSampleBufferCreateReadyWithImageBuffer(kCFAllocatorDefault,
                                                     replacement, fmt,
                                                     &timing, &out);
-    CFRelease(fmt);
+    if (ownFmt) CFRelease(fmt);
 
     if (err != noErr || !out) {
         VCamLogE("wrap: CMSampleBufferCreateReadyWithImageBuffer err=%d", (int)err);
