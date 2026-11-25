@@ -16,6 +16,38 @@
 extern void     vcam_push_to_remote_sink(id node, CMSampleBufferRef sb, id input);
 extern uint64_t vcam_last_natural_render(void);
 
+// iOS 15+ delivers IOSurface-compressed frames in the capture graph by default
+// (WWDC21 "lossless"/"lossy" formats), and on iOS 18/26 these reach the sinks of
+// many third-party apps -- TikTok and other front-camera/effects apps above all.
+// We cannot render INTO a compressed buffer, so without this mapping their frames
+// hit an unsupported format and we pass the real camera through (no vcam at all).
+//
+// But a lossless/lossy buffer is transparent on access: a consumer that locks it,
+// binds it to Metal, or hands it to CoreImage sees ordinary 8-bit 4:2:0. So the
+// honest substitution is to render the UNCOMPRESSED sibling of the same range and
+// describe it truthfully -- '&8v0'/'-8v0' -> '420v', '&8f0'/'-8f0' -> '420f'. The
+// 10-bit packed families ('&xv0', '&xf0', ...) have no 8-bit sibling we render,
+// so they stay unsupported and pass through, which is correct for HDR.
+// FourCC values given as hex so the lossless/lossy constants resolve on every
+// SDK (they are absent from older CoreVideo headers) without -Wmultichar noise.
+#define VCAM_FCC_LOSSLESS_420V 0x26387630u  // '&8v0'
+#define VCAM_FCC_LOSSY_420V    0x2D387630u  // '-8v0'
+#define VCAM_FCC_LOSSLESS_420F 0x26386630u  // '&8f0'
+#define VCAM_FCC_LOSSY_420F    0x2D386630u  // '-8f0'
+
+static OSType vcam_uncompressed_sibling(OSType f) {
+    switch ((uint32_t)f) {
+        case VCAM_FCC_LOSSLESS_420V:
+        case VCAM_FCC_LOSSY_420V:
+            return kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;   // '420v'
+        case VCAM_FCC_LOSSLESS_420F:
+        case VCAM_FCC_LOSSY_420F:
+            return kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;    // '420f'
+        default:
+            return f;   // already uncompressed, or something we do not synthesise
+    }
+}
+
 static double vcam_ticks_to_seconds(uint64_t ticks) {
     static mach_timebase_info_data_t tb;
     static dispatch_once_t once;
@@ -259,7 +291,11 @@ static const double kVCamStallThresholdSec = 2.0 / kVCamTargetFPS;
             hadImageBuffer = YES;
             width  = CVPixelBufferGetWidth(original);
             height = CVPixelBufferGetHeight(original);
-            format = CVPixelBufferGetPixelFormatType(original);
+            // A lossless/lossy IOSurface-compressed frame (the iOS 18/26 default
+            // in many apps) maps to its uncompressed sibling: we render that and
+            // describe it honestly, so the consumer gets our content rather than
+            // a pass-through.
+            format = vcam_uncompressed_sibling(CVPixelBufferGetPixelFormatType(original));
         } else {
             CMFormatDescriptionRef desc = CMSampleBufferGetFormatDescription(sb);
             if (desc && CMFormatDescriptionGetMediaType(desc) == kCMMediaType_Video) {

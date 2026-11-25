@@ -1,25 +1,54 @@
 // VCamAudioEngine.m -- Produces the audio that replaces the live microphone
+//
+// Threading contract -- read before editing:
+//   The replacement is requested from BWAudioConverterNode's own render thread,
+//   which is part of the live capture graph. That thread must NEVER block on
+//   I/O: stalling it stalls the graph, and a long enough stall trips the media
+//   watchdog, which takes cameracaptured (and the host app) down. So the render
+//   thread here only ever does lock-free-ish work -- copy already-decoded PCM out
+//   of a ring buffer and build a CMSampleBuffer. All AVAssetReader decoding
+//   happens ahead of time on a private queue (`_q`) that keeps the ring topped
+//   up. If the ring is short (startup, or the file briefly can't keep pace) the
+//   shortfall is filled with silence for that one buffer -- quiet, never a block
+//   and never the real mic leaking through.
+//
+//   Ownership of state:
+//     * `_ring`, `_pendingASBD`, `_havePending`  -- guarded by `_ringLock`;
+//       touched by BOTH the render thread and `_q`.
+//     * everything else (`_reader`, `_output`, `_carry`, `_targetASBD`,
+//       `_haveTarget`, `_url`, `_ringCap`)       -- touched ONLY on `_q`.
+
 #import "VCamAudioEngine.h"
 #import "VCamMediaSource.h"
 #import "VCamTypes.h"
 #import <AVFoundation/AVFoundation.h>
+#include <os/lock.h>
+#include <stdatomic.h>
+
+// Target fill expressed in seconds of audio; the byte cap is derived per format.
+static const double kVCamAudioRingSeconds = 0.5;
+static const size_t kVCamAudioRingMinBytes = 64 * 1024;
+static const size_t kVCamAudioRingMaxBytes = 2 * 1024 * 1024;
 
 @implementation VCamAudioEngine {
     dispatch_queue_t _q;
 
-    // The file the current mode decodes from (nil for None/Microphone).
-    NSURL *_url;
+    // -- `_q`-only reader state ------------------------------------------
+    NSURL                      *_url;          // file for Video/Custom (nil otherwise)
+    AVAssetReader              *_reader;
+    AVAssetReaderTrackOutput   *_output;
+    AudioStreamBasicDescription _targetASBD;   // format the reader is emitting
+    BOOL                        _haveTarget;
+    NSMutableData              *_carry;         // decoded bytes not yet ringed
+    size_t                      _ringCap;
 
-    // AVAssetReader streaming LPCM in the target format. Rebuilt when either the
-    // URL or the target format changes. Guarded by _q.
-    AVAssetReader            *_reader;
-    AVAssetReaderTrackOutput *_output;
-    AudioStreamBasicDescription _targetASBD;   // what the reader is emitting
-    BOOL                      _haveTarget;
+    // -- shared, under _ringLock -----------------------------------------
+    os_unfair_lock              _ringLock;
+    NSMutableData              *_ring;          // decoded PCM in _targetASBD
+    AudioStreamBasicDescription _pendingASBD;   // format the render thread needs
+    BOOL                        _havePending;
 
-    // Leftover decoded bytes not yet consumed by a request, so frame counts that
-    // do not divide evenly across reader buffers still produce a seamless stream.
-    NSMutableData *_carry;
+    _Atomic bool                _refillScheduled;
 }
 
 + (VCamAudioEngine *)sharedEngine {
@@ -31,9 +60,13 @@
 
 - (instancetype)init {
     if (!(self = [super init])) return nil;
-    _q     = dispatch_queue_create("com.yiffysec.vcam.audioengine",
-                                    DISPATCH_QUEUE_SERIAL);
-    _carry = [NSMutableData data];
+    _q        = dispatch_queue_create("com.yiffysec.vcam.audioengine",
+                                       DISPATCH_QUEUE_SERIAL);
+    _carry    = [NSMutableData data];
+    _ring     = [NSMutableData data];
+    _ringLock = OS_UNFAIR_LOCK_INIT;
+    _ringCap  = kVCamAudioRingMinBytes;
+    atomic_store(&_refillScheduled, false);
     return self;
 }
 
@@ -46,12 +79,16 @@
             return;   // unchanged
         }
         self->_url = url;
-        [self teardownReaderLocked];
+        [self teardownReader];
+        os_unfair_lock_lock(&self->_ringLock);
+        [self->_ring setLength:0];
+        self->_havePending = NO;
+        os_unfair_lock_unlock(&self->_ringLock);
         VCamLogI("audio: source set to %{public}@", url.lastPathComponent ?: @"(none)");
     });
 }
 
-// -- Replacement ----------------------------------------------------------
+// -- Replacement (render thread) ------------------------------------------
 - (CMSampleBufferRef)replacementForBuffer:(CMSampleBufferRef)original
                                       mode:(VCamAudioMode)mode
                                      muted:(BOOL)muted {
@@ -60,9 +97,6 @@
     // Microphone, unmuted: the one mode that passes the real audio through.
     if (mode == VCamAudioMicrophone && !muted) return NULL;
 
-    // Everything else replaces. None and muted-mic are silence; Video/Custom try
-    // the file and fall back to silence. Describe the target format from the
-    // buffer we are replacing so whatever we build slots in exactly.
     CMFormatDescriptionRef fmt = CMSampleBufferGetFormatDescription(original);
     if (!fmt || CMFormatDescriptionGetMediaType(fmt) != kCMMediaType_Audio) {
         return NULL;   // not audio we understand -- leave it alone
@@ -78,18 +112,204 @@
 
     NSMutableData *pcm;
     BOOL wantFile = (mode == VCamAudioVideo || mode == VCamAudioCustom);
+
     if (wantFile) {
-        pcm = [self pcmOfLength:bytesNeeded forASBD:asbd];   // nil on any failure
+        pcm = [self takeFromRing:bytesNeeded wantASBD:asbd];   // never blocks
     }
     if (!pcm) {
-        // Silence: a correctly sized, zero-filled buffer. Always works.
+        // Silence: a correctly sized, zero-filled buffer. Always works, and is
+        // what None / muted / a not-yet-primed file all resolve to.
         pcm = [NSMutableData dataWithLength:bytesNeeded];
     }
 
-    return [self bufferWithPCM:pcm
-                        frames:frames
-                        format:fmt
-                        timing:original];
+    return [self bufferWithPCM:pcm frames:frames format:fmt timing:original];
+}
+
+/// Copies up to `bytesNeeded` bytes of decoded PCM out of the ring, consuming
+/// them, and zero-pads any shortfall so the result is always exactly the size
+/// asked for. Publishes the format the render thread needs and schedules a
+/// background refill. Returns nil only when there is nothing decoded yet AND the
+/// caller should treat the whole buffer as silence (same effect as a zero-pad,
+/// but lets None/muted skip the ring entirely upstream).
+- (NSMutableData *)takeFromRing:(size_t)bytesNeeded
+                       wantASBD:(const AudioStreamBasicDescription *)asbd {
+    NSMutableData *out = [NSMutableData dataWithCapacity:bytesNeeded];
+
+    os_unfair_lock_lock(&_ringLock);
+
+    // Tell the prefetcher which format to decode into. A change clears the ring
+    // so the render thread never reads bytes in a stale format.
+    if (!_havePending || memcmp(&_pendingASBD, asbd, sizeof(*asbd)) != 0) {
+        _pendingASBD = *asbd;
+        _havePending = YES;
+        [_ring setLength:0];
+    }
+
+    NSUInteger take = MIN((NSUInteger)bytesNeeded, _ring.length);
+    if (take > 0) {
+        [out appendBytes:_ring.bytes length:take];
+        [_ring replaceBytesInRange:NSMakeRange(0, take) withBytes:NULL length:0];
+    }
+
+    os_unfair_lock_unlock(&_ringLock);
+
+    if (out.length < bytesNeeded) {
+        out.length = bytesNeeded;   // zero-pads the shortfall with silence
+    }
+
+    [self scheduleRefill];
+    return out;
+}
+
+// -- Background prefetch (`_q`) --------------------------------------------
+- (void)scheduleRefill {
+    bool expected = false;
+    if (!atomic_compare_exchange_strong(&_refillScheduled, &expected, true)) {
+        return;   // a refill is already queued
+    }
+    dispatch_async(_q, ^{
+        atomic_store(&self->_refillScheduled, false);
+        @try {
+            [self refill];
+        } @catch (NSException *ex) {
+            VCamLogE("audio: refill threw %{public}@", ex.reason);
+        }
+    });
+}
+
+- (void)refill {
+    if (!_url) return;
+
+    // Adopt the render thread's requested format if it changed.
+    AudioStreamBasicDescription want;
+    BOOL have;
+    os_unfair_lock_lock(&_ringLock);
+    want = _pendingASBD;
+    have = _havePending;
+    os_unfair_lock_unlock(&_ringLock);
+    if (!have) return;
+
+    if (!_haveTarget || memcmp(&_targetASBD, &want, sizeof(want)) != 0 || !_reader) {
+        [self teardownReader];
+        if (![self buildReaderForASBD:&want]) return;
+        _ringCap = [self ringCapForASBD:&want];
+    }
+
+    int loops = 0;
+    for (;;) {
+        os_unfair_lock_lock(&_ringLock);
+        BOOL full    = (_ring.length >= _ringCap);
+        BOOL stale   = (memcmp(&_pendingASBD, &_targetASBD, sizeof(_targetASBD)) != 0);
+        os_unfair_lock_unlock(&_ringLock);
+
+        if (stale) return;   // format changed under us; next refill rebuilds
+        if (full)  return;
+
+        NSData *chunk = [self nextChunk];
+        if (!chunk) {
+            if (++loops > 2) return;       // file yields nothing -- avoid a spin
+            [self restartReader];          // seamless loop
+            continue;
+        }
+        loops = 0;
+
+        os_unfair_lock_lock(&_ringLock);
+        if (memcmp(&_pendingASBD, &_targetASBD, sizeof(_targetASBD)) == 0) {
+            [_ring appendData:chunk];
+        } else {
+            [_ring setLength:0];
+            os_unfair_lock_unlock(&_ringLock);
+            return;
+        }
+        os_unfair_lock_unlock(&_ringLock);
+    }
+}
+
+- (size_t)ringCapForASBD:(const AudioStreamBasicDescription *)asbd {
+    double bytesPerSec = asbd->mSampleRate * (double)asbd->mBytesPerFrame;
+    size_t cap = (size_t)(bytesPerSec * kVCamAudioRingSeconds);
+    if (cap < kVCamAudioRingMinBytes) cap = kVCamAudioRingMinBytes;
+    if (cap > kVCamAudioRingMaxBytes) cap = kVCamAudioRingMaxBytes;
+    return cap;
+}
+
+// -- AVAssetReader plumbing (all `_q`) ------------------------------------
+- (BOOL)buildReaderForASBD:(const AudioStreamBasicDescription *)asbd {
+    AVURLAsset *asset = [AVURLAsset URLAssetWithURL:_url options:nil];
+    NSArray<AVAssetTrack *> *tracks = [asset tracksWithMediaType:AVMediaTypeAudio];
+    if (!tracks.count) {
+        VCamLogI("audio: %{public}@ has no audio track", _url.lastPathComponent);
+        return NO;
+    }
+
+    NSError *err = nil;
+    AVAssetReader *reader = [[AVAssetReader alloc] initWithAsset:asset error:&err];
+    if (!reader) { VCamLogE("audio: reader init failed %{public}@", err); return NO; }
+
+    // Ask the reader for LPCM in exactly the target format, so no separate
+    // conversion step is needed and the bytes drop straight into the ring.
+    NSDictionary *settings = @{
+        AVFormatIDKey:            @(kAudioFormatLinearPCM),
+        AVSampleRateKey:          @(asbd->mSampleRate),
+        AVNumberOfChannelsKey:    @(asbd->mChannelsPerFrame),
+        AVLinearPCMBitDepthKey:   @((asbd->mBitsPerChannel) ?: 16),
+        AVLinearPCMIsFloatKey:    @((asbd->mFormatFlags & kAudioFormatFlagIsFloat) ? YES : NO),
+        AVLinearPCMIsBigEndianKey:@((asbd->mFormatFlags & kAudioFormatFlagIsBigEndian) ? YES : NO),
+        AVLinearPCMIsNonInterleaved:@((asbd->mFormatFlags & kAudioFormatFlagIsNonInterleaved) ? YES : NO),
+    };
+    AVAssetReaderTrackOutput *out =
+        [AVAssetReaderTrackOutput assetReaderTrackOutputWithTrack:tracks.firstObject
+                                                   outputSettings:settings];
+    out.alwaysCopiesSampleData = NO;
+    if (![reader canAddOutput:out]) {
+        VCamLogE("audio: reader rejected target LPCM format");
+        return NO;
+    }
+    [reader addOutput:out];
+    if (![reader startReading]) {
+        VCamLogE("audio: startReading failed %{public}@", reader.error);
+        return NO;
+    }
+
+    _reader     = reader;
+    _output     = out;
+    _targetASBD = *asbd;
+    _haveTarget = YES;
+    [_carry setLength:0];
+    return YES;
+}
+
+- (NSData *)nextChunk {
+    if (!_output) return nil;
+    CMSampleBufferRef sb = [_output copyNextSampleBuffer];
+    if (!sb) return nil;
+
+    CMBlockBufferRef block = CMSampleBufferGetDataBuffer(sb);
+    if (!block) { CFRelease(sb); return nil; }
+
+    size_t total = 0;
+    char *ptr = NULL;
+    OSStatus err = CMBlockBufferGetDataPointer(block, 0, NULL, &total, &ptr);
+    if (err != noErr || !ptr || total == 0) { CFRelease(sb); return nil; }
+
+    NSData *data = [NSData dataWithBytes:ptr length:total];
+    CFRelease(sb);
+    return data;
+}
+
+- (void)restartReader {
+    AudioStreamBasicDescription asbd = _targetASBD;
+    BOOL had = _haveTarget;
+    [self teardownReader];
+    if (had) [self buildReaderForASBD:&asbd];
+}
+
+- (void)teardownReader {
+    [_reader cancelReading];
+    _reader     = nil;
+    _output     = nil;
+    _haveTarget = NO;
+    [_carry setLength:0];
 }
 
 // -- Build a CMSampleBuffer from PCM --------------------------------------
@@ -127,141 +347,6 @@
         return NULL;
     }
     return out;
-}
-
-// -- File decode ----------------------------------------------------------
-// Returns exactly `length` bytes of LPCM in the target format, looping the file,
-// or nil if the file cannot be read in that format (caller then uses silence).
-- (NSMutableData *)pcmOfLength:(size_t)length
-                       forASBD:(const AudioStreamBasicDescription *)asbd {
-    if (!_url) return nil;
-
-    __block NSMutableData *result = nil;
-    dispatch_sync(_q, ^{
-        // (Re)build the reader if the target format changed or it is not running.
-        if (!_haveTarget ||
-            memcmp(&_targetASBD, asbd, sizeof(*asbd)) != 0 ||
-            !_reader) {
-            [self teardownReaderLocked];
-            if (![self buildReaderForASBD:asbd]) return;
-        }
-
-        NSMutableData *out = [NSMutableData dataWithCapacity:length];
-
-        // Spend carry-over first.
-        if (_carry.length) {
-            NSUInteger take = MIN(_carry.length, length);
-            [out appendBytes:_carry.bytes length:take];
-            [_carry replaceBytesInRange:NSMakeRange(0, take) withBytes:NULL length:0];
-        }
-
-        int loops = 0;
-        while (out.length < length) {
-            NSData *chunk = [self nextChunkLocked];
-            if (!chunk) {
-                // Exhausted: restart for a seamless loop. Guard against a file
-                // that yields nothing, so we never spin forever.
-                if (++loops > 2) break;
-                [self restartReaderLocked];
-                continue;
-            }
-            loops = 0;
-            NSUInteger need = length - out.length;
-            if (chunk.length <= need) {
-                [out appendData:chunk];
-            } else {
-                [out appendBytes:chunk.bytes length:need];
-                [_carry appendBytes:(const char *)chunk.bytes + need
-                             length:chunk.length - need];
-            }
-        }
-
-        // Only accept a full buffer; a short read becomes silence upstream so we
-        // never emit a half-filled audio buffer.
-        if (out.length >= length) {
-            out.length = length;
-            result = out;
-        }
-    });
-    return result;
-}
-
-- (BOOL)buildReaderForASBD:(const AudioStreamBasicDescription *)asbd {
-    AVURLAsset *asset = [AVURLAsset URLAssetWithURL:_url options:nil];
-    NSArray<AVAssetTrack *> *tracks = [asset tracksWithMediaType:AVMediaTypeAudio];
-    if (!tracks.count) {
-        VCamLogI("audio: %{public}@ has no audio track", _url.lastPathComponent);
-        return NO;
-    }
-
-    NSError *err = nil;
-    AVAssetReader *reader = [[AVAssetReader alloc] initWithAsset:asset error:&err];
-    if (!reader) { VCamLogE("audio: reader init failed %{public}@", err); return NO; }
-
-    // Ask the reader for LPCM in exactly the target format, so no separate
-    // conversion step is needed and the bytes drop straight into the buffer.
-    NSDictionary *settings = @{
-        AVFormatIDKey:            @(kAudioFormatLinearPCM),
-        AVSampleRateKey:          @(asbd->mSampleRate),
-        AVNumberOfChannelsKey:    @(asbd->mChannelsPerFrame),
-        AVLinearPCMBitDepthKey:   @((asbd->mBitsPerChannel) ?: 16),
-        AVLinearPCMIsFloatKey:    @((asbd->mFormatFlags & kAudioFormatFlagIsFloat) ? YES : NO),
-        AVLinearPCMIsBigEndianKey:@((asbd->mFormatFlags & kAudioFormatFlagIsBigEndian) ? YES : NO),
-        AVLinearPCMIsNonInterleaved:@((asbd->mFormatFlags & kAudioFormatFlagIsNonInterleaved) ? YES : NO),
-    };
-    AVAssetReaderTrackOutput *out =
-        [AVAssetReaderTrackOutput assetReaderTrackOutputWithTrack:tracks.firstObject
-                                                   outputSettings:settings];
-    out.alwaysCopiesSampleData = NO;
-    if (![reader canAddOutput:out]) {
-        VCamLogE("audio: reader rejected target LPCM format");
-        return NO;
-    }
-    [reader addOutput:out];
-    if (![reader startReading]) {
-        VCamLogE("audio: startReading failed %{public}@", reader.error);
-        return NO;
-    }
-
-    _reader     = reader;
-    _output     = out;
-    _targetASBD = *asbd;
-    _haveTarget = YES;
-    [_carry setLength:0];
-    return YES;
-}
-
-- (NSData *)nextChunkLocked {
-    if (!_output) return nil;
-    CMSampleBufferRef sb = [_output copyNextSampleBuffer];
-    if (!sb) return nil;
-
-    CMBlockBufferRef block = CMSampleBufferGetDataBuffer(sb);
-    if (!block) { CFRelease(sb); return nil; }
-
-    size_t total = 0;
-    char *ptr = NULL;
-    OSStatus err = CMBlockBufferGetDataPointer(block, 0, NULL, &total, &ptr);
-    if (err != noErr || !ptr || total == 0) { CFRelease(sb); return nil; }
-
-    NSData *data = [NSData dataWithBytes:ptr length:total];
-    CFRelease(sb);
-    return data;
-}
-
-- (void)restartReaderLocked {
-    AudioStreamBasicDescription asbd = _targetASBD;
-    BOOL had = _haveTarget;
-    [self teardownReaderLocked];
-    if (had) [self buildReaderForASBD:&asbd];
-}
-
-- (void)teardownReaderLocked {
-    [_reader cancelReading];
-    _reader     = nil;
-    _output     = nil;
-    _haveTarget = NO;
-    [_carry setLength:0];
 }
 
 @end

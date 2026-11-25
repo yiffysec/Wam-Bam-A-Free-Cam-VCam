@@ -1,19 +1,31 @@
-// VCamClient.x -- Per-app gating, injected into every UIKit application
+// VCamClient.x -- Per-app gating + in-app HUD, injected into every UIKit app
 //
-// cameracaptured serves every app from one process, so the daemon alone cannot
-// tell which app a frame is destined for without reaching into private client
-// identity structures that move between iOS releases. Instead this tiny dylib
-// rides along in the app, and when the app actually starts a capture session it
-// publishes the verdict for its own bundle identifier into shared memory.
+// Two jobs, both because the daemon serves every app from one process and cannot
+// cleanly tell apps apart from inside:
 //
-// The daemon then simply honours clientAllowed. In system-wide mode the verdict
-// is always YES, so this component is a no-op and the tweak works even if this
-// dylib fails to load.
+//   1. Per-app gating. When the app starts a capture session it publishes the
+//      verdict for its own bundle identifier into shared memory; the daemon then
+//      honours clientAllowed. In system-wide mode the verdict is always YES, so
+//      this is a no-op and the tweak works even if this dylib fails to load.
+//
+//   2. The floating HUD, OVER THE APP. A window created in SpringBoard is
+//      composited beneath a foreground app's own scene on modern iOS, so it is
+//      invisible while an app is up -- which is exactly when the user wants the
+//      controls. The fix is to put the pill in the app's OWN active scene, from
+//      inside the app, at UIWindowLevelAlert. We raise it while a capture session
+//      is running (the only time the camera controls are useful) and take it down
+//      when the session stops. The shared VCamFloatingHUD is the same pill the
+//      SpringBoard HUD shows; this is just the app-side trigger.
+//
+// Everything here is wrapped so a failure degrades to "no in-app HUD", never a
+// crashed host app.
 
 #import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
 #import "../Shared/VCamSharedState.h"
 #import "../Shared/VCamConfig.h"
+#import "../Shared/VCamFloatingHUD.h"
 #import "../Shared/VCamTypes.h"
 
 static NSString *vcam_own_bundle_id(void) {
@@ -46,6 +58,28 @@ static void vcam_publish_client_verdict(void) {
              bid, (int)allowed, (int)cfg.perAppEnabled);
 }
 
+// -- In-app HUD -----------------------------------------------------------
+static void vcam_client_show_hud(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @try {
+            [[VCamConfig shared] reload];
+            [[VCamFloatingHUD shared] presentInScene:nil];
+        } @catch (NSException *ex) {
+            VCamLogE("VCamClient: HUD present threw %{public}@", ex.reason);
+        }
+    });
+}
+
+static void vcam_client_hide_hud(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @try {
+            [[VCamFloatingHUD shared] dismiss];
+        } @catch (NSException *ex) {
+            VCAM_UNUSED(ex);
+        }
+    });
+}
+
 %hook AVCaptureSession
 
 - (void)startRunning {
@@ -55,6 +89,13 @@ static void vcam_publish_client_verdict(void) {
         VCamLogE("VCamClient: verdict publish threw %{public}@", ex.reason);
     }
     %orig;
+    // The camera is live in this app now: raise the controls over it.
+    vcam_client_show_hud();
+}
+
+- (void)stopRunning {
+    %orig;
+    vcam_client_hide_hud();
 }
 
 - (void)addInput:(AVCaptureInput *)input {
@@ -79,11 +120,24 @@ static void vcam_publish_client_verdict(void) {
 
         vcam_shm_open();
 
-        // Keep the verdict current if the user flips per-app settings while the
-        // app sits in the foreground.
+        // Keep the verdict current, and the HUD in step, if the user flips
+        // settings while the app sits in the foreground.
         vcam_notify_observe(kVCamNotifyConfigChanged,
                             dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
             vcam_publish_client_verdict();
+            dispatch_async(dispatch_get_main_queue(), ^{
+                @try { [[VCamFloatingHUD shared] refresh]; }
+                @catch (NSException *ex) { VCAM_UNUSED(ex); }
+            });
+        });
+
+        // Let the app raise the pill on demand (e.g. the companion app asks every
+        // process to show it) even if no capture session is running.
+        vcam_notify_observe(kVCamNotifyToggleHUD, dispatch_get_main_queue(), ^{
+            @try {
+                [[VCamConfig shared] reload];
+                [[VCamFloatingHUD shared] presentInScene:nil];
+            } @catch (NSException *ex) { VCAM_UNUSED(ex); }
         });
 
         %init;

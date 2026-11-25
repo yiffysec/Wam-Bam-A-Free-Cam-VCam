@@ -16,7 +16,8 @@ WBFCVCamSpring_FILES = VCamSpringBoard.x \
                        ../Shared/VCamPaths.m \
                        ../Shared/VCamDiagnostics.c \
                        ../Shared/VCamConfig.m \
-                       ../Shared/VCamHUDBridge.m
+                       ../Shared/VCamHUDBridge.m \
+                       ../Shared/VCamFloatingHUD.m
 
 WBFCVCamSpring_FRAMEWORKS = UIKit Foundation CoreGraphics
 

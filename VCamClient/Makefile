@@ -15,9 +15,10 @@ WBFCVCamClient_FILES      = VCamClient.x \
                              ../Shared/VCamSharedState.c \
                              ../Shared/VCamPaths.m \
                              ../Shared/VCamDiagnostics.c \
-                             ../Shared/VCamConfig.m
+                             ../Shared/VCamConfig.m \
+                             ../Shared/VCamFloatingHUD.m
 
-WBFCVCamClient_FRAMEWORKS = Foundation AVFoundation
+WBFCVCamClient_FRAMEWORKS = Foundation AVFoundation UIKit CoreGraphics
 WBFCVCamClient_CFLAGS     = -fobjc-arc -I$(THEOS_PROJECT_DIR)/../Shared
 WBFCVCamClient_LDFLAGS    = -undefined dynamic_lookup
 WBFCVCamClient_INSTALL_PATH = /Library/MobileSubstrate/DynamicLibraries

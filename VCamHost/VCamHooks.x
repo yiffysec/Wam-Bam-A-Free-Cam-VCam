@@ -134,54 +134,43 @@ static inline BOOL vcam_should_replace(void) {
 // =========================================================================
 //  Replacement sample buffer
 // =========================================================================
-// CFDictionaryApplyFunction takes a C function pointer, not a block.
-static void vcam_copy_attachment(const void *key, const void *value, void *ctx) {
-    if (key && value && ctx) {
-        CFDictionarySetValue((CFMutableDictionaryRef)ctx, key, value);
-    }
-}
-
-/// Wraps our pixel buffer in a sample buffer that inherits the original's
-/// timing and attachments, so CMTime monotonicity -- which AVFoundation asserts
-/// on -- and camera metadata both survive substitution.
+/// Wraps our pixel buffer in a sample buffer that inherits ONLY the original's
+/// timing and a format description matching our pixels. It deliberately carries
+/// across none of the real frame's per-sample attachments.
+///
+/// WHY SO LITTLE -- the "some apps crash on camera open" bug:
+///   A live camera sample buffer, especially from the front camera with effects
+///   (TikTok, Snapchat, portrait/FaceTime), carries attachments that point at or
+///   assert consistency with the frame they rode in on: depth/disparity maps,
+///   the portrait-effects matte, face-detection and smart-style metadata, the
+///   per-frame camera-intrinsic matrix, and private capture keys. Copy those
+///   onto a DIFFERENT image buffer and the first downstream node or app that
+///   dereferences one -- stabilisation (BWVISNode), a depth consumer, an
+///   effects renderer -- faults, which takes cameracaptured down and the app
+///   with it (AVErrorMediaServicesWereReset). Apps that attach no companion
+///   data survive, which is exactly the "some apps crash, some don't" pattern.
+///   A frame with none of that metadata still displays and records perfectly;
+///   it just will not drive effects that track the real scene -- the correct
+///   trade for a virtual camera, and far better than a crash.
+///
+/// Timing is inherited because AVFoundation asserts on CMTime monotonicity. The
+/// format description is reused from the original when it already matches our
+/// buffer (keeping its clean-aperture / colour extensions, which are safe), and
+/// otherwise derived and given only the safe geometry extensions above.
 static CMSampleBufferRef vcam_wrap(CMSampleBufferRef original,
                                     CVPixelBufferRef replacement)
                                     CF_RETURNS_RETAINED {
     if (!replacement) return NULL;
 
-    // Carry the real frame's metadata onto our buffer the way a processing step
-    // is meant to: colour primaries, transfer function, YCbCr matrix, chroma
-    // siting and the rest. This both makes our pixels describe themselves
-    // correctly and lets the original format description (below) match our
-    // buffer, so its extensions are preserved instead of lost to a derived one.
-    CVImageBufferRef origImage =
-        original ? CMSampleBufferGetImageBuffer(original) : NULL;
-    if (origImage) {
-        CVBufferPropagateAttachments((CVBufferRef)origImage,
-                                     (CVBufferRef)replacement);
-    }
-
-    // Format description: prefer the ORIGINAL's over a freshly derived one.
-    //
-    // A description built with CMVideoFormatDescriptionCreateForImageBuffer
-    // describes only what the pixel buffer itself carries -- it drops the
-    // extensions the capture pipeline attached to the real frame: clean
-    // aperture, pixel aspect ratio, full-range flags, field detail, and the
-    // private capture keys apps and the graph's own downstream nodes read and
-    // assert on. Substituting a buffer whose description is missing those is a
-    // way to crash a host app even when the pixel format itself is one we
-    // support. So when the original's description matches our buffer (same
-    // dimensions, format and colour), we reuse it verbatim and keep every
-    // extension; only when it genuinely does not match do we derive one.
     CMFormatDescriptionRef fmt = NULL;
-    BOOL ownFmt = NO;
 
     CMFormatDescriptionRef origFmt =
         original ? CMSampleBufferGetFormatDescription(original) : NULL;
     if (origFmt &&
         CMVideoFormatDescriptionMatchesImageBuffer(origFmt, replacement)) {
+        // Same dimensions, format and colour: its extensions describe our buffer
+        // just as well, and a format description references no companion data.
         fmt = (CMFormatDescriptionRef)CFRetain(origFmt);
-        ownFmt = YES;
     } else {
         OSStatus derr = CMVideoFormatDescriptionCreateForImageBuffer(
                             kCFAllocatorDefault, replacement, &fmt);
@@ -189,9 +178,7 @@ static CMSampleBufferRef vcam_wrap(CMSampleBufferRef original,
             VCamLogE("wrap: format description failed err=%d", (int)derr);
             return NULL;
         }
-        ownFmt = YES;
     }
-    OSStatus err = noErr;
 
     CMSampleTimingInfo timing = {
         .duration              = CMTimeMake(1, kVCamTargetFPS),
@@ -217,27 +204,14 @@ static CMSampleBufferRef vcam_wrap(CMSampleBufferRef original,
     }
 
     CMSampleBufferRef out = NULL;
-    err = CMSampleBufferCreateReadyWithImageBuffer(kCFAllocatorDefault,
-                                                    replacement, fmt,
-                                                    &timing, &out);
-    if (ownFmt) CFRelease(fmt);
+    OSStatus err = CMSampleBufferCreateReadyWithImageBuffer(kCFAllocatorDefault,
+                                                             replacement, fmt,
+                                                             &timing, &out);
+    CFRelease(fmt);
 
     if (err != noErr || !out) {
         VCamLogE("wrap: CMSampleBufferCreateReadyWithImageBuffer err=%d", (int)err);
         return NULL;
-    }
-
-    // Carry over orientation, exposure and the rest so the buffer looks native.
-    if (original) {
-        CFArrayRef srcAtt = CMSampleBufferGetSampleAttachmentsArray(original, false);
-        CFArrayRef dstAtt = CMSampleBufferGetSampleAttachmentsArray(out, true);
-        if (srcAtt && dstAtt &&
-            CFArrayGetCount(srcAtt) > 0 && CFArrayGetCount(dstAtt) > 0) {
-            CFDictionaryRef s = CFArrayGetValueAtIndex(srcAtt, 0);
-            CFMutableDictionaryRef d =
-                (CFMutableDictionaryRef)CFArrayGetValueAtIndex(dstAtt, 0);
-            if (s && d) CFDictionaryApplyFunction(s, vcam_copy_attachment, d);
-        }
     }
 
     return out;
